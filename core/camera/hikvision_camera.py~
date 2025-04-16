@@ -1,0 +1,1408 @@
+"""
+海康威视相机模块
+
+实现海康威视相机的接口，使用适配器模式，
+将海康威视SDK的接口适配到统一的相机接口。
+"""
+import time
+import threading
+import traceback
+import ctypes
+from typing import Dict, List, Tuple, Any
+import numpy as np
+import os
+import sys
+import cv2
+from ctypes import cast, POINTER, byref, c_ubyte, cdll
+
+from Cython import sizeof
+
+from ..utils.logger import get_logger
+from ..utils.error_handler import handle_exception
+from .camera_interface import CameraInterface
+from ..utils.signal_manager import signal_manager
+
+logger = get_logger()
+
+# 尝试导入海康威视SDK
+try:
+    # 添加SDK路径 - 先尝试当前项目路径
+    sdk_path = os.path.abspath(os.path.join(os.path.dirname(__file__),  'MvImport'))
+    if sdk_path not in sys.path:
+        sys.path.append(sdk_path)
+        
+    # # 也尝试添加detectProject中的路径，这是已经工作的项目
+    # detect_project_path = os.path.abspath(r"D:\F\innotime\YOLO\detectProject")
+    # if detect_project_path not in sys.path:
+    #     sys.path.append(detect_project_path)
+    
+    from core.camera.MvImport.MvCameraControl_class import MvCamera
+    from core.camera.MvImport.MvCameraControl_class import MV_CC_DEVICE_INFO_LIST, MV_CC_DEVICE_INFO, MV_FRAME_OUT
+    from core.camera.MvImport.MvCameraControl_class import MV_GIGE_DEVICE, MV_USB_DEVICE, MV_TRIGGER_MODE_OFF
+    from core.camera.MvImport.MvErrorDefine_const import MV_OK
+    from core.camera.MvImport.CameraParams_header import MVCC_FLOATVALUE
+    from core.camera.MvImport.PixelType_header import *
+    
+    HIKVISION_SDK_AVAILABLE = True
+    logger.info("海康威视SDK导入成功")
+except ImportError as e:
+    logger.warning(f"海康威视SDK导入失败: {str(e)}，将使用模拟模式")
+    HIKVISION_SDK_AVAILABLE = False
+    
+    # 定义一些SDK常量，用于模拟模式
+    class MV_OK:
+        pass
+    
+    class MV_TRIGGER_MODE_OFF:
+        pass
+    
+    class MV_E_CALLORDER:
+        pass
+    
+    class MV_E_PARAMETER:
+        pass
+    
+    class MV_GIGE_DEVICE:
+        pass
+    
+    class MV_CC_DEVICE_INFO_LIST:
+        def __init__(self):
+            self.nDeviceNum = 0
+            self.pDeviceInfo = []
+                
+    class MV_CC_DEVICE_INFO:
+        def __init__(self):
+            self.nTLayerType = 0
+    
+    class MV_FRAME_OUT:
+        def __init__(self):
+            self.stFrameInfo = None
+            self.pBufAddr = None
+    
+    class MvCamera:
+        def MV_CC_EnumDevices(self, nTLayerType, stDevList):
+            return 0
+            
+        def MV_CC_CreateHandle(self, pDeviceInfo):
+            return 0
+            
+        def MV_CC_DestroyHandle(self):
+            return 0
+            
+        def MV_CC_OpenDevice(self):
+            return 0
+            
+        def MV_CC_CloseDevice(self):
+            return 0
+            
+        def MV_CC_StartGrabbing(self):
+            return 0
+            
+        def MV_CC_StopGrabbing(self):
+            return 0
+            
+        def MV_CC_GetOptimalPacketSize(self):
+            return 1500
+            
+        def MV_CC_SetIntValue(self, strKey, nValue):
+            return 0
+            
+        def MV_CC_SetFloatValue(self, strKey, fValue):
+            return 0
+            
+        def MV_CC_SetEnumValue(self, strKey, nValue):
+            return 0
+            
+        def MV_CC_SetCommandValue(self, strKey):
+            return 0
+            
+        def MV_CC_GetFloatValue(self, strKey, stFloatValue):
+            stFloatValue.fCurValue = 0.0
+            return 0
+            
+        def MV_CC_GetBoolValue(self, strKey, stBoolValue):
+            return 0
+            
+        def MV_CC_GetImageBuffer(self, stOutFrame, nMsec):
+            return 0
+            
+        def MV_CC_FreeImageBuffer(self, stOutFrame):
+            return 0
+
+
+# 工作线程结束辅助函数
+def _async_raise(tid, exctype):
+    """
+    异步抛出线程异常，用于终止线程
+
+    参数:
+    - tid: 要抛出异常的线程的ID，为整数。
+    - exctype: 要抛出的异常类型，可以是异常类或异常实例。
+
+    返回值:
+    无返回值。
+    """
+    import ctypes
+    import inspect
+    
+    tid = ctypes.c_long(tid)     # 将线程ID转换为ctypes长整型，以适配C接口
+
+    # 确保exctype是异常类型
+    if not inspect.isclass(exctype):
+        exctype = type(exctype)
+    # 尝试设置异步异常
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, ctypes.py_object(exctype))
+    if res == 0:
+        # 如果线程ID无效，则抛出ValueError
+        raise ValueError("无效的线程ID")
+    elif res != 1:
+        # 如果设置异常失败，则尝试恢复线程状态，并抛出SystemError
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, None)
+        raise SystemError("PyThreadState_SetAsyncExc失败")
+
+
+def _stop_thread(thread):
+    """
+    停止线程
+    """
+    if thread is not None and thread.is_alive():
+        _async_raise(thread.ident, SystemExit)
+
+
+# 辅助函数：将整数转换为16进制字符串
+def _to_hex_str(num):
+    """
+    将整数转换为16进制字符串
+    """
+    chaDic = {10: 'a', 11: 'b', 12: 'c', 13: 'd', 14: 'e', 15: 'f'}
+    hexStr = ""
+    if num < 0:
+        num = num + 2 ** 32
+    while num >= 16:
+        digit = num % 16
+        hexStr = chaDic.get(digit, str(digit)) + hexStr
+        num //= 16
+    hexStr = chaDic.get(num, str(num)) + hexStr
+    return hexStr
+
+
+# 类型判断辅助函数
+def _is_mono_data(pixel_type):
+    """
+    判断是否为单色图像
+    """
+    if HIKVISION_SDK_AVAILABLE:
+        return (pixel_type == PixelType_Gvsp_Mono8 or 
+                pixel_type == PixelType_Gvsp_Mono10 or 
+                pixel_type == PixelType_Gvsp_Mono10_Packed or 
+                pixel_type == PixelType_Gvsp_Mono12 or 
+                pixel_type == PixelType_Gvsp_Mono12_Packed)
+    return False
+
+
+def _is_color_data(pixel_type):
+    """
+    判断是否为彩色图像
+    """
+    if HIKVISION_SDK_AVAILABLE:
+        return (pixel_type == PixelType_Gvsp_BayerGR8 or 
+                pixel_type == PixelType_Gvsp_BayerRG8 or 
+                pixel_type == PixelType_Gvsp_BayerGB8 or 
+                pixel_type == PixelType_Gvsp_BayerBG8 or 
+                pixel_type == PixelType_Gvsp_BayerGR10 or 
+                pixel_type == PixelType_Gvsp_BayerRG10 or 
+                pixel_type == PixelType_Gvsp_BayerGB10 or 
+                pixel_type == PixelType_Gvsp_BayerBG10 or 
+                pixel_type == PixelType_Gvsp_BayerGR12 or 
+                pixel_type == PixelType_Gvsp_BayerRG12 or 
+                pixel_type == PixelType_Gvsp_BayerGB12 or 
+                pixel_type == PixelType_Gvsp_BayerBG12 or 
+                pixel_type == PixelType_Gvsp_BayerGR10_Packed or 
+                pixel_type == PixelType_Gvsp_BayerRG10_Packed or 
+                pixel_type == PixelType_Gvsp_BayerGB10_Packed or 
+                pixel_type == PixelType_Gvsp_BayerBG10_Packed or 
+                pixel_type == PixelType_Gvsp_BayerGR12_Packed or 
+                pixel_type == PixelType_Gvsp_BayerRG12_Packed or 
+                pixel_type == PixelType_Gvsp_BayerGB12_Packed or 
+                pixel_type == PixelType_Gvsp_BayerBG12_Packed or 
+                pixel_type == PixelType_Gvsp_YUV422_Packed or 
+                pixel_type == PixelType_Gvsp_YUV422_YUYV_Packed)
+    return False
+
+
+# 图像转换辅助函数
+def _mono_to_numpy(data, width, height):
+    """
+    将单色图像数据转换为numpy数组
+    """
+    data_arr = np.frombuffer(data, count=int(width * height), dtype=np.uint8, offset=0)
+    data_mono_arr = data_arr.reshape(height, width)
+    num_array = np.zeros([height, width, 1], "uint8")
+    num_array[:, :, 0] = data_mono_arr
+    return num_array
+
+
+def _color_to_numpy(data, width, height):
+    """
+    将彩色图像数据转换为numpy数组
+    """
+    data_arr = np.frombuffer(data, count=int(width * height * 3), dtype=np.uint8, offset=0)
+    data_r = data_arr[0:width * height * 3:3]
+    data_g = data_arr[1:width * height * 3:3]
+    data_b = data_arr[2:width * height * 3:3]
+
+    data_r_arr = data_r.reshape(height, width)
+    data_g_arr = data_g.reshape(height, width)
+    data_b_arr = data_b.reshape(height, width)
+    
+    num_array = np.zeros([height, width, 3], "uint8")
+    num_array[:, :, 0] = data_r_arr
+    num_array[:, :, 1] = data_g_arr
+    num_array[:, :, 2] = data_b_arr
+    
+    return num_array
+
+
+class HikvisionCamera(CameraInterface):
+    """
+    海康威视相机类
+    
+    实现了相机接口，适配海康威视SDK的功能。
+    """
+    
+    def __init__(self):
+        """初始化海康威视相机"""
+        self._obj_cam = MvCamera() if HIKVISION_SDK_AVAILABLE else None
+        self._device_list = None
+        self._connect_num = 0
+        self._grabbing = False
+        self._is_open = False
+        self._thread_handle = None
+        self._thread_closed = False
+        self._exit = False
+        self._frame_info = None
+        
+        # 参数
+        self._frame_rate = 0
+        self._exposure_time = 0
+        self._gain = 0
+        
+        # 模拟模式相关变量 - 明确设置为False，除非SDK不可用
+        self._is_simulation = False
+        if not HIKVISION_SDK_AVAILABLE:
+            self._is_simulation = True
+            logger.warning("SDK不可用，切换到模拟模式")
+        # 图像参数
+        self._frame_width = 1280
+        self._frame_height = 1024
+        self._roi = (0, 0, self._frame_width, self._frame_height)
+        self._trigger_mode = False
+        # 保存图像
+        self._save_bmp = False
+        self._save_jpg = False
+        
+        # 缓冲区锁
+        self._buf_lock = threading.Lock()
+        
+        logger.info(f"海康威视相机初始化完成，模拟模式：{self._is_simulation}")
+    
+    def _simulate_image(self) -> np.ndarray:
+        """
+        生成模拟图像
+        
+        在SDK不可用时用于测试
+        
+        Returns:
+            模拟图像数据
+        """
+        # 创建一个灰度图像
+        img = np.ones((self._frame_height, self._frame_width), dtype=np.uint8) * 128
+        
+        # 添加一些图案，例如中心十字和边框
+        h, w = img.shape
+        thickness = 2
+        
+        # 中心十字
+        cv = int(w / 2)
+        ch = int(h / 2)
+        img[ch-50:ch+50, cv-thickness:cv+thickness] = 255  # 垂直线
+        img[ch-thickness:ch+thickness, cv-50:cv+50] = 255  # 水平线
+        
+        # 边框
+        img[0:thickness, :] = 200  # 上边框
+        img[h-thickness:h, :] = 200  # 下边框
+        img[:, 0:thickness] = 200  # 左边框
+        img[:, w-thickness:w] = 200  # 右边框
+        
+        # 添加噪声
+        noise = np.random.normal(0, 5, (h, w)).astype(np.int8)
+        img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        
+        # 当前时间戳
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 创建彩色图像
+        color_img = np.stack([img, img, img], axis=2)
+        
+        # 添加一个旋转的矩形以模拟动态
+        angle = int(time.time() * 10) % 360
+        rect_center = (cv, ch)
+        rect_size = (100, 50)
+        rect_angle = angle
+        
+        box = cv2.boxPoints((rect_center, rect_size, rect_angle))
+        box = np.intp(box)
+        cv2.drawContours(color_img, [box], 0, (0, 0, 255), 2)
+        
+        # 添加时间戳文本
+        cv2.putText(color_img, timestamp, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        return color_img
+
+    @handle_exception
+    def enumerate_devices(self) -> List[Dict[str, Any]]:
+        """
+        枚举可用的相机设备
+        
+        Returns:
+            可用相机设备列表，每个设备为一个字典，包含设备信息
+        """
+        if self._is_simulation:
+        # 模拟模式下返回一个虚拟设备
+            return [{
+                'device_id': 'SIM001',
+                'device_name': '模拟海康相机',
+                'vendor_name': 'Hikvision(模拟)',
+                'model_name': 'MV-SIM001',
+                'serial_number': 'SIM001',
+                'user_id': 'SIM001',
+                'is_target_model': False
+            }]
+    
+        # 创建设备列表
+        self._device_list = MV_CC_DEVICE_INFO_LIST()
+        
+        # 枚举设备 - 同时枚举GigE和USB设备
+        ret = MvCamera.MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE, self._device_list)
+        if ret != 0:
+            logger.error(f"枚举设备失败，错误码：0x{_to_hex_str(ret)}")
+            return []
+        
+        logger.info(f"找到 {self._device_list.nDeviceNum} 个设备")
+            
+        devices = []
+        for i in range(self._device_list.nDeviceNum):
+            device_info = {}
+            mvcc_dev_info = cast(self._device_list.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
+            if mvcc_dev_info:
+                # 提取设备信息
+                device_id = str(i)
+                
+                # 判断网口/U口相机
+                if mvcc_dev_info.nTLayerType == MV_GIGE_DEVICE:
+                    # 网口相机
+                    nip1 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0xff000000) >> 24)
+                    nip2 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x00ff0000) >> 16)
+                    nip3 = ((mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x0000ff00) >> 8)
+                    nip4 = (mvcc_dev_info.SpecialInfo.stGigEInfo.nCurrentIp & 0x000000ff)
+                    device_ip = f"{nip1}.{nip2}.{nip3}.{nip4}"
+                    device_type = "GigE"
+                    
+                    # 尝试获取型号名称
+                    model_name = ""
+                    for j in range(64):
+                        if mvcc_dev_info.SpecialInfo.stGigEInfo.chModelName[j] > 0:
+                            model_name += chr(mvcc_dev_info.SpecialInfo.stGigEInfo.chModelName[j])
+                        else:
+                            break
+                    
+                    # 尝试获取序列号
+                    serial_number = ""
+                    for j in range(16):
+                        if mvcc_dev_info.SpecialInfo.stGigEInfo.chSerialNumber[j] > 0:
+                            serial_number += chr(mvcc_dev_info.SpecialInfo.stGigEInfo.chSerialNumber[j])
+                        else:
+                            break
+                    
+                    # 尝试获取制造商名称
+                    manufacturer_name = ""
+                    for j in range(32):
+                        if mvcc_dev_info.SpecialInfo.stGigEInfo.chManufacturerName[j] > 0:
+                            manufacturer_name += chr(mvcc_dev_info.SpecialInfo.stGigEInfo.chManufacturerName[j])
+                        else:
+                            break
+                    
+                    device_name = f"{manufacturer_name}-{model_name}" if manufacturer_name and model_name else f"GigE: {device_ip}"
+                    vendor_name = manufacturer_name if manufacturer_name else 'Hikvision'
+                else:
+                    # USB相机
+                    device_type = "USB"
+                    device_ip = None
+                    
+                    # 尝试获取型号名称
+                    model_name = ""
+                    for j in range(64):
+                        if mvcc_dev_info.SpecialInfo.stUsb3VInfo.chModelName[j] > 0:
+                            model_name += chr(mvcc_dev_info.SpecialInfo.stUsb3VInfo.chModelName[j])
+                        else:
+                            break
+                    
+                    # 尝试获取序列号
+                    serial_number = ""
+                    for j in range(64):
+                        if mvcc_dev_info.SpecialInfo.stUsb3VInfo.chSerialNumber[j] > 0:
+                            serial_number += chr(mvcc_dev_info.SpecialInfo.stUsb3VInfo.chSerialNumber[j])
+                        else:
+                            break
+                    
+                    # 尝试获取制造商名称
+                    manufacturer_name = ""
+                    for j in range(64):
+                        if mvcc_dev_info.SpecialInfo.stUsb3VInfo.chManufacturerName[j] > 0:
+                            manufacturer_name += chr(mvcc_dev_info.SpecialInfo.stUsb3VInfo.chManufacturerName[j])
+                        else:
+                            break
+                    
+                    device_name = f"{manufacturer_name}-{model_name}" if manufacturer_name and model_name else f"USB Camera-{i}"
+                    vendor_name = manufacturer_name if manufacturer_name else 'Hikvision'
+                
+                # 检查是否是目标型号：MV-CI003-GL-N6
+                is_target_model = "MV-CI003-GL-N6" in model_name
+                if is_target_model:
+                    logger.info(f"发现目标型号相机 MV-CI003-GL-N6: ID={device_id}, SN={serial_number}")
+                
+                # 添加设备信息
+                device_info = {
+                    'device_id': device_id,
+                    'device_name': device_name,
+                    'device_type': device_type,
+                    'device_ip': device_ip,
+                    'vendor_name': vendor_name,
+                    'model_name': model_name if model_name else 'Unknown',
+                    'serial_number': serial_number if serial_number else device_id,
+                    'user_id': device_id,
+                    'is_target_model': is_target_model
+                }
+                devices.append(device_info)
+        
+        return devices
+    
+    @handle_exception
+    def open(self, device_id: str = "") -> bool:
+        """打开相机"""
+        if self._is_open:
+            logger.info("相机已经打开")
+            return True
+            
+        if self._is_simulation:
+            logger.info(f"模拟模式：打开相机 {device_id if device_id else 'SIM001'}")
+            self._is_open = True
+            return True
+            
+        # 获取设备列表
+        if not self._device_list or self._device_list.nDeviceNum == 0:
+            devices = self.enumerate_devices()
+            if not devices:
+                logger.error("没有找到可用的相机设备")
+                return False
+            
+        if self._device_list.nDeviceNum == 0:
+            logger.error("没有找到可用的相机设备")
+            return False
+            
+        # 确定要打开的设备索引
+        device_index = 0
+        
+        # 如果没有指定设备ID，优先选择MV-CI003-GL-N6型号相机
+        if not device_id:
+            devices_info = self.enumerate_devices()
+            for device in devices_info:
+                if device.get('is_target_model', False):
+                    device_id = device['device_id']
+                    logger.info(f"自动选择MV-CI003-GL-N6型号相机，ID: {device_id}")
+                    break
+        
+        # 处理设备ID
+        if device_id:
+            try:
+                device_index = int(device_id)
+                if device_index < 0 or device_index >= self._device_list.nDeviceNum:
+                    logger.warning(f"无效的设备ID: {device_id}，将使用默认设备")
+                    device_index = 0
+            except ValueError:
+                logger.warning(f"无效的设备ID格式: {device_id}，将使用默认设备")
+        
+        self._connect_num = device_index
+        logger.info(f"尝试打开设备，索引: {device_index}")
+                    
+        # 创建相机句柄
+        try:
+            stDeviceList = cast(self._device_list.pDeviceInfo[int(device_index)], POINTER(MV_CC_DEVICE_INFO)).contents
+            ret = self._obj_cam.MV_CC_CreateHandle(stDeviceList)
+            if ret != 0:
+                logger.error(f"创建相机句柄失败，错误码：0x{_to_hex_str(ret)}")
+                return False
+                
+            # 打开设备
+            ret = self._obj_cam.MV_CC_OpenDevice()
+            if ret != 0:
+                logger.error(f"打开相机失败，错误码：0x{_to_hex_str(ret)}")
+                self._obj_cam.MV_CC_DestroyHandle()
+                return False
+                
+            # 设置网络最佳包大小(GigE相机)
+            if stDeviceList.nTLayerType == MV_GIGE_DEVICE:
+                packet_size = self._obj_cam.MV_CC_GetOptimalPacketSize()
+                if packet_size > 0:
+                    ret = self._obj_cam.MV_CC_SetIntValue("GevSCPSPacketSize", packet_size)
+                    if ret != 0:
+                        logger.warning(f"设置网络包大小失败，错误码：0x{_to_hex_str(ret)}")
+                    else:
+                        logger.info(f"设置最佳网络包大小: {packet_size} 字节")
+                else:
+                    logger.warning(f"获取最佳包大小失败: {packet_size}")
+            
+            # 设置触发模式为关闭
+            ret = self._obj_cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
+            if ret != 0:
+                logger.warning(f"设置触发模式失败，错误码：0x{_to_hex_str(ret)}")
+            
+            self._is_open = True
+            logger.info(f"相机打开成功，设备索引：{device_index}")
+            
+            # 获取相机参数
+            self.get_parameter()
+            
+            return True
+        except Exception as e:
+            logger.error(f"打开相机时发生异常: {str(e)}")
+            if hasattr(self._obj_cam, 'MV_CC_DestroyHandle'):
+                self._obj_cam.MV_CC_DestroyHandle()
+            return False
+    
+    @handle_exception
+    def close(self) -> bool:
+        """
+        关闭相机
+        
+        Returns:
+            是否成功关闭相机
+        """
+        if not self._is_open:
+            return True
+            
+        if self._grabbing:
+            self.stop_grabbing()
+            
+        if self._is_simulation:
+            logger.info("模拟模式：关闭相机")
+            self._is_open = False
+            return True
+            
+        # 关闭设备
+        ret = self._obj_cam.MV_CC_CloseDevice()
+        if ret != 0:
+            logger.error(f"关闭相机失败，错误码：{ret}")
+            return False
+            
+        # 销毁句柄
+        ret = self._obj_cam.MV_CC_DestroyHandle()
+        if ret != 0:
+            logger.error(f"销毁相机句柄失败，错误码：{ret}")
+                
+        self._is_open = False
+        logger.info("相机关闭成功")
+        return True
+    
+    @handle_exception
+    def is_open(self) -> bool:
+        """
+        检查相机是否已打开
+        
+        Returns:
+            相机是否已打开
+        """
+        return self._is_open
+    
+    @handle_exception
+    def start_grabbing(self) -> bool:
+        """
+        开始采集图像
+        
+        Returns:
+            是否成功开始采集
+        """
+        if not self._is_open:
+            logger.error("相机未打开，无法开始采集")
+            return False
+            
+        if self._grabbing:
+            logger.info("相机已在采集中")
+            return True
+            
+        if self._is_simulation:
+            logger.info("模拟模式：开始采集")
+            self._grabbing = True
+            self._exit = False
+            
+            # 创建采集线程
+            try:
+                self._thread_handle = threading.Thread(target=self._simulation_thread)
+                self._thread_handle.start()
+                self._thread_closed = True
+            except Exception as e:
+                logger.error(f"创建模拟采集线程失败: {str(e)}")
+                return False
+                
+            return True
+            
+        # 开始采集
+        ret = self._obj_cam.MV_CC_StartGrabbing()
+        if ret != 0:
+            logger.error(f"开始采集失败，错误码：{ret}")
+            return False
+            
+        self._grabbing = True
+        self._exit = False
+        
+        # 创建采集线程
+        try:
+            self._thread_handle = threading.Thread(target=self._work_thread)
+            self._thread_handle.start()
+            self._thread_closed = True
+        except Exception as e:
+            logger.error(f"创建采集线程失败: {str(e)}")
+            self._obj_cam.MV_CC_StopGrabbing()
+            self._grabbing = False
+            return False
+            
+        logger.info("开始采集成功")
+        return True
+
+    @handle_exception
+    def stop_grabbing(self) -> bool:
+        """
+        停止采集图像
+        
+        Returns:
+            是否成功停止采集
+        """
+        if not self._is_open:
+            logger.error("相机未打开，无法停止采集")
+            return False
+            
+        if not self._grabbing:
+            logger.info("相机未在采集中")
+            return True
+            
+        if self._is_simulation:
+            logger.info("模拟模式：停止采集")
+            # 退出线程
+            if self._thread_closed:
+                _stop_thread(self._thread_handle)
+                self._thread_closed = False
+            self._grabbing = False
+            self._exit = True
+            return True
+            
+        # 退出线程
+        if self._thread_closed:
+            _stop_thread(self._thread_handle)
+            self._thread_closed = False
+        
+        # 停止采集
+        ret = self._obj_cam.MV_CC_StopGrabbing()
+        if ret != 0:
+            logger.error(f"停止采集失败，错误码：{ret}")
+            return False
+            
+        self._grabbing = False
+        self._exit = True
+        logger.info("停止采集成功")
+        return True
+    
+    @handle_exception
+    def is_grabbing(self) -> bool:
+        """
+        检查相机是否正在采集
+        
+        Returns:
+            相机是否正在采集
+        """
+        return self._grabbing
+    
+    @handle_exception
+    def set_trigger_mode(self, trigger_on: bool) -> bool:
+        """
+        设置触发模式
+        
+        Args:
+            trigger_on: True为触发模式，False为连续采集模式
+            
+        Returns:
+            设置是否成功
+        """
+        if not self._is_open:
+            logger.error("相机未打开，无法设置触发模式")
+            return False
+            
+        if self._is_simulation:
+            logger.info(f"模拟模式：设置触发模式为 {'开' if trigger_on else '关'}")
+            self._trigger_mode = trigger_on
+            return True
+            
+        # 设置触发模式
+        if not trigger_on:
+            # 关闭触发模式，设置为连续采集
+            ret = self._obj_cam.MV_CC_SetEnumValue("TriggerMode", 0)
+            if ret != 0:
+                logger.error(f"设置连续采集模式失败，错误码：{ret}")
+                return False
+        else:
+            # 开启触发模式
+            ret = self._obj_cam.MV_CC_SetEnumValue("TriggerMode", 1)
+            if ret != 0:
+                logger.error(f"设置触发模式失败，错误码：{ret}")
+                return False
+            # 设置软触发
+            ret = self._obj_cam.MV_CC_SetEnumValue("TriggerSource", 7)
+            if ret != 0:
+                logger.error(f"设置软触发源失败，错误码：{ret}")
+                return False
+                
+        self._trigger_mode = trigger_on
+        logger.info(f"设置触发模式为 {'开' if trigger_on else '关'} 成功")
+        return True
+    
+    @handle_exception
+    def trigger_once(self) -> bool:
+        """
+        软触发一次
+        
+        Returns:
+            触发是否成功
+        """
+        if not self._is_open:
+            logger.error("相机未打开，无法触发")
+            return False
+            
+        if not self._trigger_mode:
+            logger.warning("相机不在触发模式，无法触发")
+            return False
+            
+        if self._is_simulation:
+            logger.info("模拟模式：软触发一次")
+            return True
+            
+        # 软触发
+        ret = self._obj_cam.MV_CC_SetCommandValue("TriggerSoftware")
+        if ret != 0:
+            logger.error(f"软触发失败，错误码：{ret}")
+            return False
+            
+        return True
+    
+    @handle_exception 
+    def get_parameter(self) -> dict:
+        """
+        获取相机参数
+        
+        Returns:
+            相机参数
+        """
+        if self._is_simulation:
+            return {
+                'exposure_time': self._exposure_time,
+                'gain': self._gain,
+                'frame_rate': self._frame_rate,
+                'width': self._frame_width,
+                'height': self._frame_height,
+                'roi': self._roi
+            }
+        
+        params = {}
+        
+        try:
+            # 为MV_CC_GetIntValue准备C结构体
+            class MVCC_INTVALUE(ctypes.Structure):
+                _fields_ = [
+                    ("nCurValue", ctypes.c_uint32),
+                    ("nMax", ctypes.c_uint32),
+                    ("nMin", ctypes.c_uint32),
+                    ("nInc", ctypes.c_uint32),
+                    ("nReserved", ctypes.c_uint32 * 4)
+                ]
+            
+            # 获取宽度
+            stIntValue = MVCC_INTVALUE()
+            ret = self._obj_cam.MV_CC_GetIntValue("Width", stIntValue)
+            if ret == 0:
+                self._frame_width = stIntValue.nCurValue
+                params['width'] = stIntValue.nCurValue
+            
+            # 获取高度
+            ret = self._obj_cam.MV_CC_GetIntValue("Height", stIntValue)
+            if ret == 0:
+                self._frame_height = stIntValue.nCurValue
+                params['height'] = stIntValue.nCurValue
+            
+            # 帧率控制开关
+            class MVCC_BOOLVALUE(ctypes.Structure):
+                _fields_ = [
+                    ("bCurValue", ctypes.c_bool),
+                    ("bReserved", ctypes.c_bool * 31)
+                ]
+            
+            stBoolValue = MVCC_BOOLVALUE()
+            ret = self._obj_cam.MV_CC_GetBoolValue("AcquisitionFrameRateEnable", stBoolValue)
+            if ret == 0:
+                params['frame_rate_enable'] = stBoolValue.bCurValue
+            
+            # 获取帧率
+            class MVCC_FLOATVALUE(ctypes.Structure):
+                _fields_ = [
+                    ("fCurValue", ctypes.c_float),
+                    ("fMax", ctypes.c_float),
+                    ("fMin", ctypes.c_float),
+                    ("fReserved", ctypes.c_float * 4)
+                ]
+            
+            stFloatValue = MVCC_FLOATVALUE()
+            ret = self._obj_cam.MV_CC_GetFloatValue("AcquisitionFrameRate", stFloatValue)
+            if ret == 0:
+                self._frame_rate = stFloatValue.fCurValue
+                params['frame_rate'] = stFloatValue.fCurValue
+            
+            # 获取曝光时间
+            ret = self._obj_cam.MV_CC_GetFloatValue("ExposureTime", stFloatValue)
+            if ret == 0:
+                self._exposure_time = stFloatValue.fCurValue
+                params['exposure_time'] = stFloatValue.fCurValue
+            
+            # 获取增益
+            ret = self._obj_cam.MV_CC_GetFloatValue("Gain", stFloatValue)
+            if ret == 0:
+                self._gain = stFloatValue.fCurValue
+                params['gain'] = stFloatValue.fCurValue
+            
+            # ROI相关参数
+            ret = self._obj_cam.MV_CC_GetIntValue("OffsetX", stIntValue)
+            if ret == 0:
+                offsetX = stIntValue.nCurValue
+            else:
+                offsetX = 0
+                
+            ret = self._obj_cam.MV_CC_GetIntValue("OffsetY", stIntValue)
+            if ret == 0:
+                offsetY = stIntValue.nCurValue
+            else:
+                offsetY = 0
+                
+            self._roi = (offsetX, offsetY, self._frame_width, self._frame_height)
+            params['roi'] = self._roi
+        
+        except Exception as e:
+            logger.error(f"获取相机参数时出错: {str(e)}")
+            traceback.print_exc()
+        
+        return params
+    
+    @handle_exception
+    def set_parameter(self, frame_rate: float = None, exposure_time: float = None, gain: float = None) -> bool:
+        """
+        设置相机参数
+        
+        Args:
+            frame_rate: 帧率
+            exposure_time: 曝光时间
+            gain: 增益
+            
+        Returns:
+            设置是否成功
+        """
+        if not self._is_open:
+            logger.error("相机未打开，无法设置参数")
+            return False
+            
+        if self._is_simulation:
+            logger.info(f"模拟模式：设置参数 帧率={frame_rate}, 曝光时间={exposure_time}, 增益={gain}")
+            if frame_rate is not None:
+                self._frame_rate = frame_rate
+            if exposure_time is not None:
+                self._exposure_time = exposure_time
+            if gain is not None:
+                self._gain = gain
+            return True
+            
+        try:
+            # 关闭自动曝光
+            ret = self._obj_cam.MV_CC_SetEnumValue("ExposureAuto", 0)
+            if ret != 0:
+                logger.warning(f"关闭自动曝光失败，错误码：{ret}")
+                
+            # 设置曝光时间
+            if exposure_time is not None:
+                ret = self._obj_cam.MV_CC_SetFloatValue("ExposureTime", float(exposure_time))
+                if ret != 0:
+                    logger.error(f"设置曝光时间失败，错误码：{ret}")
+                    return False
+                self._exposure_time = exposure_time
+                
+            # 设置增益
+            if gain is not None:
+                ret = self._obj_cam.MV_CC_SetFloatValue("Gain", float(gain))
+                if ret != 0:
+                    logger.error(f"设置增益失败，错误码：{ret}")
+                    return False
+                self._gain = gain
+                
+            # 设置帧率
+            if frame_rate is not None:
+                ret = self._obj_cam.MV_CC_SetFloatValue("AcquisitionFrameRate", float(frame_rate))
+                if ret != 0:
+                    logger.error(f"设置帧率失败，错误码：{ret}")
+                    return False
+                self._frame_rate = frame_rate
+                
+            logger.info(f"设置相机参数成功: 帧率={self._frame_rate}, 曝光时间={self._exposure_time}, 增益={self._gain}")
+            return True
+        except Exception as e:
+            logger.error(f"设置相机参数失败: {str(e)}")
+            return False
+    
+    @handle_exception
+    def get_frame(self) -> np.ndarray:
+        """
+        获取一帧图像
+        
+        Returns:
+            图像数据（numpy数组）
+        """
+        if not self._is_open:
+            logger.error("相机未打开，无法获取图像")
+            return np.zeros((1, 1, 3), dtype=np.uint8)
+            
+        if self._is_simulation:
+            # 模拟模式下直接生成一张测试图像
+            return self._simulate_image()
+            
+        # 实际使用中，通常是从采集线程中获取图像
+        # 这里简化处理，直接获取一帧
+        if not self._grabbing:
+            logger.warning("相机未在采集中，尝试启动采集")
+            self.start_grabbing()
+            time.sleep(0.1)  # 稍微等待采集启动
+            
+        # 由于实际实现中图像是由采集线程推送的，这里直接返回一个空帧
+        # 真实的图像会通过signal_manager的信号发送出去
+        # 但为了兼容接口，这里返回一个空图像
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+    
+    def _simulation_thread(self):
+        """
+        模拟采集线程函数
+        """
+        logger.info("模拟采集线程启动")
+        while not self._exit:
+            if not self._trigger_mode:
+                # 连续模式下定时生成图像
+                frame = self._simulate_image()
+                # 发送图像信号
+                signal_manager.frame_ready_signal.emit(frame, "SIM001")
+                # 模拟帧率
+                time.sleep(1.0 / max(1, self._frame_rate))
+            else:
+                # 触发模式下不主动生成图像，等待触发
+                time.sleep(0.01)
+                
+        logger.info("模拟采集线程退出")
+    
+    def _work_thread(self):
+        """
+        相机采集线程函数
+        """
+        logger.info("相机采集线程启动")
+        
+        stOutFrame = MV_FRAME_OUT()
+        ctypes.memset(ctypes.byref(stOutFrame), 0, ctypes.sizeof(stOutFrame))    # 
+        
+        while not self._exit:
+            ret = self._obj_cam.MV_CC_GetImageBuffer(stOutFrame, 1000)
+            if ret == 0:
+                # 获取图像数据成功
+                try:
+                    # 保存帧信息
+                    self._frame_info = stOutFrame.stFrameInfo
+                    
+                    # 获取图像数据
+                    height = stOutFrame.stFrameInfo.nHeight
+                    width = stOutFrame.stFrameInfo.nWidth
+                    pixel_type = stOutFrame.stFrameInfo.enPixelType
+                    buffer_size = stOutFrame.stFrameInfo.nFrameLen
+                    # logger.info(f"stOutFrame.stFrameInfo.nFrameLen: {buffer_size}")
+
+                    # 根据图像类型进行处理
+                    if _is_mono_data(pixel_type):
+                        # 单色图像
+                        # 获取缓存锁
+                        self._buf_lock.acquire()
+                        pData = (c_ubyte * buffer_size)()
+                        cdll.msvcrt.memcpy(byref(pData), stOutFrame.pBufAddr, buffer_size)
+                        self._buf_lock.release()
+                        data = np.frombuffer(pData, 
+                                            count=int(width * height), 
+                                            dtype=np.uint8)
+                        mono_array = data.reshape(height, width)
+                        frame = cv2.cvtColor(mono_array, cv2.COLOR_GRAY2BGR)
+                        # 释放缓存
+                        self._obj_cam.MV_CC_FreeImageBuffer(stOutFrame)
+                    elif pixel_type == PixelType_Gvsp_YUV422_YUYV_Packed:
+                        # YUV格式图像
+                        # 申请内存(注意YUV422_YUYV_Packed的图像数据大小为Width*Height*2)4 Bytes for 2 pixels-------------
+                        pData = (c_ubyte * stOutFrame.stFrameInfo.nWidth * stOutFrame.stFrameInfo.nHeight * 2)()
+                        cdll.msvcrt.memcpy(byref(pData), stOutFrame.pBufAddr,
+                                stOutFrame.stFrameInfo.nWidth * stOutFrame.stFrameInfo.nHeight * 2)
+                        data = np.frombuffer(pData,
+                                            count=int(width * height * 2),
+                                            dtype=np.uint8)
+                        yuv_array = data.reshape(height, width, -1)
+                        frame = cv2.cvtColor(yuv_array, cv2.COLOR_YUV2BGR_YUYV)
+                    else:
+                        # 彩色图像
+                        data = np.frombuffer(stOutFrame.pBufAddr, 
+                                            count=int(width * height * 3), 
+                                            dtype=np.uint8)
+                        r_data = data[0:width * height * 3:3]
+                        g_data = data[1:width * height * 3:3]
+                        b_data = data[2:width * height * 3:3]
+                        
+                        r_array = r_data.reshape(height, width)
+                        g_array = g_data.reshape(height, width)
+                        b_array = b_data.reshape(height, width)
+                        
+                        frame = np.zeros((height, width, 3), dtype=np.uint8)
+                        frame[:, :, 0] = b_array  # OpenCV使用BGR顺序
+                        frame[:, :, 1] = g_array
+                        frame[:, :, 2] = r_array
+                    
+                    # 通过信号发送图像
+                    signal_manager.frame_ready_signal.emit(frame, f"CAM{self._connect_num}")
+                    
+                except Exception as e:
+                    logger.error(f"处理图像数据失败: {str(e)}")
+                finally:
+                    # 释放缓存
+                    self._obj_cam.MV_CC_FreeImageBuffer(stOutFrame)
+            # else:
+            #     # 获取图像超时或失败
+            #     if ret != -1:
+                    # logger.warning(f"获取图像失败，错误码：{ret}")
+            #     time.sleep(0.01)
+                
+        logger.info("相机采集线程退出")
+    
+    def __del__(self):
+        """
+        析构函数，确保资源被释放
+        """
+        if self._grabbing:
+            self.stop_grabbing()
+        if self._is_open:
+            self.close()
+            
+
+    @handle_exception
+    def set_exposure(self, exposure_time: float) -> bool:
+        """
+        设置曝光时间
+        
+        Args:
+            exposure_time: 曝光时间(微秒)
+            
+        Returns:
+            是否成功设置
+        """
+        try:
+            if self._is_simulation:
+                self._exposure_time = exposure_time
+                return True
+                
+            ret = self._obj_cam.MV_CC_SetFloatValue("ExposureTime", float(exposure_time))
+            if ret != 0:
+                logger.error(f"设置曝光时间失败，错误码：{ret}")
+                return False
+                
+            self._exposure_time = exposure_time
+            logger.info(f"设置曝光时间成功: {exposure_time}微秒")
+            return True
+        except Exception as e:
+            logger.error(f"设置曝光时间失败: {str(e)}")
+            return False
+
+    @handle_exception
+    def get_exposure(self) -> float:
+        """
+        获取曝光时间
+        
+        Returns:
+            曝光时间(微秒)
+        """
+        if self._is_simulation:
+            return self._exposure_time
+            
+        try:
+            stFloatParam_exposureTime = MVCC_FLOATVALUE()
+            ctypes.memset(byref(stFloatParam_exposureTime), 0, sizeof(MVCC_FLOATVALUE))
+            ret = self._obj_cam.MV_CC_GetFloatValue("ExposureTime", stFloatParam_exposureTime)
+            if ret != 0:
+                logger.error(f"获取曝光时间失败，错误码：{ret}")
+                return self._exposure_time
+                
+            self._exposure_time = stFloatParam_exposureTime.fCurValue
+            return self._exposure_time
+        except Exception as e:
+            logger.error(f"获取曝光时间失败: {str(e)}")
+            return self._exposure_time
+
+    @handle_exception
+    def set_gain(self, gain: float) -> bool:
+        """
+        设置增益
+        
+        Args:
+            gain: 增益值
+            
+        Returns:
+            是否成功设置
+        """
+        try:
+            if self._is_simulation:
+                self._gain = gain
+                return True
+                
+            ret = self._obj_cam.MV_CC_SetFloatValue("Gain", float(gain))
+            if ret != 0:
+                logger.error(f"设置增益失败，错误码：{ret}")
+                return False
+                
+            self._gain = gain
+            logger.info(f"设置增益成功: {gain}")
+            return True
+        except Exception as e:
+            logger.error(f"设置增益失败: {str(e)}")
+            return False
+
+    @handle_exception
+    def get_gain(self) -> float:
+        """
+        获取增益
+        
+        Returns:
+            增益值
+        """
+        if self._is_simulation:
+            return self._gain
+            
+        try:
+            stFloatParam_gain = MVCC_FLOATVALUE()
+            ctypes.memset(byref(stFloatParam_gain), 0, sizeof(MVCC_FLOATVALUE))
+            ret = self._obj_cam.MV_CC_GetFloatValue("Gain", stFloatParam_gain)
+            if ret != 0:
+                logger.error(f"获取增益失败，错误码：{ret}")
+                return self._gain
+                
+            self._gain = stFloatParam_gain.fCurValue
+            return self._gain
+        except Exception as e:
+            logger.error(f"获取增益失败: {str(e)}")
+            return self._gain
+
+    @handle_exception
+    def set_roi(self, x: int, y: int, width: int, height: int) -> bool:
+        """
+        设置感兴趣区域(ROI)
+        
+        Args:
+            x: 左上角x坐标
+            y: 左上角y坐标
+            width: 宽度
+            height: 高度
+            
+        Returns:
+            是否成功设置
+        """
+        if self._is_simulation:
+            self._roi = (x, y, width, height)
+            return True
+            
+        try:
+            # 设置宽度
+            ret = self._obj_cam.MV_CC_SetWidth(width)
+            if ret != 0:
+                logger.error(f"设置ROI宽度失败，错误码：{ret}")
+                return False
+                
+            # 设置高度
+            ret = self._obj_cam.MV_CC_SetHeight(height)
+            if ret != 0:
+                logger.error(f"设置ROI高度失败，错误码：{ret}")
+                return False
+                
+            # 设置偏移X
+            ret = self._obj_cam.MV_CC_SetOffsetX(x)
+            if ret != 0:
+                logger.error(f"设置ROI X偏移失败，错误码：{ret}")
+                return False
+                
+            # 设置偏移Y
+            ret = self._obj_cam.MV_CC_SetOffsetY(y)
+            if ret != 0:
+                logger.error(f"设置ROI Y偏移失败，错误码：{ret}")
+                return False
+                
+            self._roi = (x, y, width, height)
+            logger.info(f"设置ROI成功: x={x}, y={y}, width={width}, height={height}")
+            return True
+        except Exception as e:
+            logger.error(f"设置ROI失败: {str(e)}")
+            return False
+
+    @handle_exception
+    def get_roi(self) -> Tuple[int, int, int, int]:
+        """
+        获取感兴趣区域(ROI)
+        
+        Returns:
+            (x, y, width, height)
+        """
+        if self._is_simulation:
+            return self._roi
+            
+        try:
+            # 获取宽度
+            stWidthParam = MV_GENTL_INT_VALUE()
+            ret = self._obj_cam.MV_CC_GetWidth(stWidthParam)
+            if ret != 0:
+                logger.error(f"获取ROI宽度失败，错误码：{ret}")
+                return self._roi
+            width = stWidthParam.nCurValue
+            
+            # 获取高度
+            stHeightParam = MV_GENTL_INT_VALUE()
+            ret = self._obj_cam.MV_CC_GetHeight(stHeightParam)
+            if ret != 0:
+                logger.error(f"获取ROI高度失败，错误码：{ret}")
+                return self._roi
+            height = stHeightParam.nCurValue
+            
+            # 获取偏移X
+            stOffsetXParam = MV_GENTL_INT_VALUE()
+            ret = self._obj_cam.MV_CC_GetOffsetX(stOffsetXParam)
+            if ret != 0:
+                logger.error(f"获取ROI X偏移失败，错误码：{ret}")
+                return self._roi
+            offset_x = stOffsetXParam.nCurValue
+            
+            # 获取偏移Y
+            stOffsetYParam = MV_GENTL_INT_VALUE()
+            ret = self._obj_cam.MV_CC_GetOffsetY(stOffsetYParam)
+            if ret != 0:
+                logger.error(f"获取ROI Y偏移失败，错误码：{ret}")
+                return self._roi
+            offset_y = stOffsetYParam.nCurValue
+            
+            self._roi = (offset_x, offset_y, width, height)
+            return self._roi
+        except Exception as e:
+            logger.error(f"获取ROI失败: {str(e)}")
+            return self._roi
+
+    @handle_exception
+    def reset_roi(self) -> bool:
+        """
+        重置感兴趣区域(ROI)到最大尺寸
+        
+        Returns:
+            是否成功重置
+        """
+        if self._is_simulation:
+            self._roi = (0, 0, self._frame_width, self._frame_height)
+            return True
+            
+        try:
+            # 获取相机信息
+            device_info = self.get_device_info()
+            if not device_info:
+                logger.error("重置ROI失败，未获取到设备信息")
+                return False
+                
+            # 获取最大宽度和高度
+            max_width = int(device_info.get("Width", 1920))
+            max_height = int(device_info.get("Height", 1080))
+            
+            # 设置为最大ROI
+            return self.set_roi(0, 0, max_width, max_height)
+        except Exception as e:
+            logger.error(f"重置ROI失败: {str(e)}")
+            return False
+        
+    @handle_exception
+    def get_device_info(self) -> Dict[str, Any]:
+        """
+        获取设备信息
+        
+        Returns:
+            设备信息字典
+        """
+        if self._is_simulation:
+            return {
+                "DeviceType": "Simulation",
+                "VendorName": "Hikvision",
+                "ModelName": "Simulation Camera",
+                "SerialNumber": "SIM001",
+                "Width": self._frame_width,
+                "Height": self._frame_height,
+                "PixelFormat": "Mono8",
+                "TriggerMode": "Off" if not self._trigger_mode else "On"
+            }
+            
+        if not self._is_open:
+            logger.warning("相机未打开，无法获取设备信息")
+            return {}
+            
+        try:
+            device_info = {}
+            
+            # 获取设备信息
+            stDeviceInfo = self._obj_cam.MV_CC_GetDeviceInfo()
+            if stDeviceInfo is None:
+                logger.error("获取设备信息失败")
+                return {}
+                
+            # 基本信息
+            device_info["DeviceType"] = "GigE" if stDeviceInfo.nTLayerType == MV_GIGE_DEVICE else "USB"
+            
+            # 如果是GigE相机
+            if stDeviceInfo.nTLayerType == MV_GIGE_DEVICE:
+                try:
+                    device_info["VendorName"] = stDeviceInfo.SpecialInfo.stGigEInfo.chManufacturerName.decode('ascii').strip('\0')
+                    device_info["ModelName"] = stDeviceInfo.SpecialInfo.stGigEInfo.chModelName.decode('ascii').strip('\0')
+                    device_info["SerialNumber"] = stDeviceInfo.SpecialInfo.stGigEInfo.chSerialNumber.decode('ascii').strip('\0')
+                except:
+                    device_info["VendorName"] = "Unknown"
+                    device_info["ModelName"] = "Unknown"
+                    device_info["SerialNumber"] = "Unknown"
+                    
+            # 获取宽度和高度
+            width_value = MV_GENTL_INT_VALUE()
+            self._obj_cam.MV_CC_GetWidth(width_value)
+            device_info["Width"] = width_value.nCurValue
+            
+            height_value = MV_GENTL_INT_VALUE()
+            self._obj_cam.MV_CC_GetHeight(height_value)
+            device_info["Height"] = height_value.nCurValue
+            
+            return device_info
+        except Exception as e:
+            logger.error(f"获取设备信息失败: {str(e)}")
+            return {}

@@ -1,0 +1,70 @@
+{
+    "app": {
+        "name": "INNOTIME智能视觉检测系统",
+        "version": "1.0.0",
+        "debug": true
+    },
+    "camera": {
+        "default_type": "hikvision",
+        "timeout": 5000,
+        "auto_reconnect": true
+    },
+    "algorithm": {
+        "default": "opencv",
+        "yolo": {
+            "model_path": "resources/models/yolov10.pt",
+            "conf_threshold": 0.25,
+            "iou_threshold": 0.45
+        },
+        "opencv": {
+            "rectangle_threshold_value": 205,
+            "rectangle_area_threshold": 15,
+            "delete_threshold_value": 180,
+            "delete_min_area_threshold": 10,
+            "distance_threshold": 40,
+            "gradient_threshold": -20.0,
+            "contour_length_threshold": 400
+        }
+    },
+    "communication": {
+        "modbus_server": {
+            "host": "127.0.0.1",
+            "port": 502,
+            "heartbeat": {
+            "enabled": true,
+            "slave_id": 1,
+            "reg_type": "coils",
+            "address": 100,
+            "interval": 1.5
+            },
+            "slaves": [
+                {
+                "alias": "视觉检测站",
+                "id": 1,
+                "groups": [
+                    {"name": "PLC触发", "type": "coils", "start": 0, "count": 1},
+                    {"name": "检测结果", "type": "holding_registers", "start": 0, "count": 1},
+                    {"name": "心跳位", "type": "coils", "start": 100, "count": 1}
+                ]
+                }
+            ]
+        }
+    },
+    "data": {
+        "image_save_path": "data/images",
+        "save_original": true,
+        "save_processed": true,
+        "image_format": "jpg",
+        "database": {
+            "type": "mongodb",
+            "host": "localhost",
+            "port": 27017,
+            "db_name": "innotime_vision"
+        }
+    },
+    "ui": {
+        "theme": "dark",
+        "language": "zh_CN",
+        "fullscreen": false
+    }
+}

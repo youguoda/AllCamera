@@ -1,0 +1,187 @@
+"""
+日志管理模块
+
+提供统一的日志记录功能，支持不同级别的日志，
+并可选择输出到控制台、文件或数据库。
+"""
+import os
+import sys
+import logging
+import logging.handlers
+import time
+from typing import Optional, Union
+from PyQt5.QtCore import pyqtSignal, QObject
+
+# 创建日志信号类
+class LoggerSignals(QObject):
+    """
+    用于在UI中显示日志的信号类
+    """
+    log_message = pyqtSignal(str, str)  # 级别, 内容
+
+# 初始化日志信号实例
+logger_signals = LoggerSignals()
+
+class Logger:
+    """
+    日志管理类
+    
+    提供统一的日志记录接口，支持控制台、文件和UI显示
+    """
+    _instance = None   # 单例
+    _initialized = False   # 初始化标志
+    
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(Logger, cls).__new__(cls)
+        return cls._instance
+    
+    def __init__(self, name: str = 'SealInspection', level: int = logging.DEBUG):
+        """
+        初始化日志管理器
+        
+        Args:
+            name: 日志记录器名称
+            level: 日志记录级别
+        """
+        if self._initialized:
+            return
+            
+        self._initialized = True
+        self.logger = logging.getLogger(name)
+        self.logger.setLevel(level)
+        self.logger.propagate = False
+        
+        # 清除已有处理器
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
+            
+        # 预定义格式
+        self.fmt = logging.Formatter(
+            '%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        
+        # 添加控制台处理器
+        self._add_console_handler()
+    
+    def _add_console_handler(self):
+        """添加控制台日志处理器"""
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(self.fmt)
+        self.logger.addHandler(console_handler)
+    
+    def add_file_handler(self, log_dir: str = 'logs', log_file: str = None, 
+                         max_bytes: int = 10485760, backup_count: int = 10):
+        """
+        添加文件日志处理器
+        
+        Args:
+            log_dir: 日志目录
+            log_file: 日志文件名，默认为当前日期
+            max_bytes: 单个日志文件最大字节数
+            backup_count: 备份文件数量
+        """
+        # 确保日志目录存在
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # 设置日志文件名
+        if log_file is None:
+            log_file = f"app_{time.strftime('%Y%m%d')}.log"
+            
+        log_path = os.path.join(log_dir, log_file)
+        
+        # 创建按大小轮转的文件处理器
+        file_handler = logging.handlers.RotatingFileHandler(
+            filename=log_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding='utf-8'
+        )
+        file_handler.setFormatter(self.fmt)
+        self.logger.addHandler(file_handler)
+    
+    def debug(self, message: str):
+        """记录调试日志"""
+        self.logger.debug(message)
+    
+    def info(self, message: str):
+        """记录信息日志"""
+        self.logger.info(message)
+        # 发送信号到UI
+        logger_signals.log_message.emit('INFO', message)
+    
+    def warning(self, message: str):
+        """记录警告日志"""
+        self.logger.warning(message)
+        # 发送信号到UI
+        logger_signals.log_message.emit('WARNING', message)
+    
+    def error(self, message: str, exc_info=False):
+        """
+        记录错误日志
+        
+        Args:
+            message: 错误信息
+            exc_info: 是否包含异常堆栈信息
+        """
+        self.logger.error(message, exc_info=exc_info)
+        # 发送信号到UI
+        logger_signals.log_message.emit('ERROR', message)
+    
+    def exception(self, message: str, exc_info=True):
+        """
+        记录异常日志，包含堆栈信息
+        
+        Args:
+            message: 异常信息
+            exc_info: 是否包含异常堆栈信息
+        """
+        self.logger.exception(message, exc_info=exc_info)
+        # 发送信号到UI
+        logger_signals.log_message.emit('ERROR', f"{message} (详细堆栈信息见日志文件)")
+    
+    def critical(self, message: str):
+        """记录严重错误日志"""
+        self.logger.critical(message)
+        # 发送信号到UI
+        logger_signals.log_message.emit('CRITICAL', message)
+    
+# 单例Logger实例
+_logger_instance = None
+
+def setup_logger(name: str = 'SealInspection', level: int = logging.DEBUG,
+                log_dir: str = 'logs', log_file: str = None) -> Logger:
+    """
+    设置并返回logger实例
+    
+    Args:
+        name: 日志记录器名称
+        level: 日志记录级别
+        log_dir: 日志目录
+        log_file: 日志文件名，默认为当前日期
+        
+    Returns:
+        Logger实例
+    """
+    global _logger_instance
+    
+    if _logger_instance is None:
+        _logger_instance = Logger(name, level)
+        _logger_instance.add_file_handler(log_dir, log_file)
+        
+    return _logger_instance
+
+def get_logger() -> Logger:
+    """
+    获取logger实例
+    
+    Returns:
+        Logger实例
+    """
+    global _logger_instance
+    
+    if _logger_instance is None:
+        _logger_instance = setup_logger()
+        
+    return _logger_instance
