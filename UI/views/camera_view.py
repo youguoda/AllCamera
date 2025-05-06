@@ -6,7 +6,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
 import time
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
 from PyQt5.QtGui import QImage, QPixmap, QIcon
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
@@ -36,6 +36,7 @@ class CameraView(BaseView):
     set_parameter_signal = pyqtSignal(str, object)   # 设置参数信号
     set_roi_signal = pyqtSignal(int, int, int, int)   # 设置ROI信号
     reset_roi_signal = pyqtSignal()           # 重置ROI信号
+    simulation_mode_changed = pyqtSignal(bool) # 模拟模式切换信号
     
     def __init__(self, parent=None):
         """
@@ -192,6 +193,10 @@ class CameraView(BaseView):
         """)
         self._camera_selection_layout.addWidget(self._refresh_button)
         
+        # 模拟模式复选框
+        self._simulation_check = QCheckBox("模拟模式")
+        self._camera_selection_layout.addWidget(self._simulation_check)
+        
         self._camera_selection_panel.add_layout(self._camera_selection_layout)
         self._control_panel_layout.addWidget(self._camera_selection_panel)
         
@@ -203,6 +208,7 @@ class CameraView(BaseView):
         self._camera_params_layout.setSpacing(SPACING["SMALL"])
         
         # 曝光设置
+        exposure_layout = QHBoxLayout()
         self._exposure_label = QLabel("曝光时间 (μs):")
         self._exposure_spinbox = QDoubleSpinBox()
         self._exposure_spinbox.setRange(1, 1000000)
@@ -214,9 +220,16 @@ class CameraView(BaseView):
             QDoubleSpinBox:hover {{ border-color: {LIGHT_COLORS["PRIMARY"]}; }}
             QDoubleSpinBox:disabled {{ background-color: {LIGHT_COLORS["DISABLED"]}; color: {LIGHT_COLORS["TEXT_DISABLED"]}; }}
         """)
-        self._camera_params_layout.addRow(self._exposure_label, self._exposure_spinbox)
-        
+        self._exposure_value_label = QLabel("0.0") # 显示曝光值
+        self._auto_exposure_check = QCheckBox("自动") # 自动曝光
+        self._auto_exposure_check.setEnabled(False)
+        exposure_layout.addWidget(self._exposure_spinbox)
+        exposure_layout.addWidget(self._exposure_value_label)
+        exposure_layout.addWidget(self._auto_exposure_check)
+        self._camera_params_layout.addRow(self._exposure_label, exposure_layout)
+
         # 增益设置
+        gain_layout = QHBoxLayout()
         self._gain_label = QLabel("增益:")
         self._gain_spinbox = QDoubleSpinBox()
         self._gain_spinbox.setRange(0, 100)
@@ -228,7 +241,27 @@ class CameraView(BaseView):
             QDoubleSpinBox:hover {{ border-color: {LIGHT_COLORS["PRIMARY"]}; }}
             QDoubleSpinBox:disabled {{ background-color: {LIGHT_COLORS["DISABLED"]}; color: {LIGHT_COLORS["TEXT_DISABLED"]}; }}
         """)
-        self._camera_params_layout.addRow(self._gain_label, self._gain_spinbox)
+        self._gain_value_label = QLabel("0.0") # 显示增益值
+        self._auto_gain_check = QCheckBox("自动") # 自动增益
+        self._auto_gain_check.setEnabled(False)
+        gain_layout.addWidget(self._gain_spinbox)
+        gain_layout.addWidget(self._gain_value_label)
+        gain_layout.addWidget(self._auto_gain_check)
+        self._camera_params_layout.addRow(self._gain_label, gain_layout)
+
+        # 白平衡设置
+        wb_layout = QHBoxLayout()
+        self._wb_label = QLabel("白平衡:")
+        self._wb_slider = QSlider(Qt.Horizontal)
+        self._wb_slider.setRange(0, 100) # 假设范围0-100，需要根据实际相机调整
+        self._wb_slider.setEnabled(False)
+        self._wb_value_label = QLabel("50") # 显示白平衡值
+        self._auto_wb_check = QCheckBox("自动") # 自动白平衡
+        self._auto_wb_check.setEnabled(False)
+        wb_layout.addWidget(self._wb_slider)
+        wb_layout.addWidget(self._wb_value_label)
+        wb_layout.addWidget(self._auto_wb_check)
+        self._camera_params_layout.addRow(self._wb_label, wb_layout)
         
         # 触发模式设置
         self._trigger_label = QLabel("触发模式:")
@@ -332,7 +365,7 @@ class CameraView(BaseView):
         self._trigger_mode_checkbox.stateChanged.connect(self._on_trigger_mode_changed)   # 触发模式改变事件
         
         # 图像查看器信号
-        self._image_viewer.roi_selected.connect(self._on_viewer_roi_selected)   # ROI选择事件
+        self._image_viewer.roi_selected.connect(self._on_roi_selected_by_viewer)   # ROI选择事件
     
     def update_device_info(self, info: Dict[str, Any]):
         """
@@ -348,7 +381,7 @@ class CameraView(BaseView):
         # 构建信息文本
         info_text = ""
         for key, value in info.items():
-            info_text += f"<b>{key}:</b> {value}<br>"
+            info_text += f"<b>{key}:</b> {value}<br>"  #
         
         self._device_info_label.setText(info_text)
     
@@ -465,16 +498,43 @@ class CameraView(BaseView):
             self.set_parameter_signal.emit("exposure", value)
     
     def _on_gain_changed(self, value):
-        """增益值变更事件"""
-        if self._is_connected:
-            self.set_parameter_signal.emit("gain", value)
-    
+        """处理增益值变化"""
+        self.set_parameter_signal.emit("gain", value)
+        self._update_gain_label(value) # 更新增益标签
+
     def _on_trigger_mode_changed(self, state):
         """触发模式变更事件"""
         if self._is_connected:
             self.set_parameter_signal.emit("trigger_mode", state == Qt.Checked)
-    
-    def _on_viewer_roi_selected(self, rect):
+
+    def _on_wb_changed(self, value):
+        """处理白平衡值变化"""
+        self.set_parameter_signal.emit("white_balance", value)
+        self._update_wb_label(value)
+
+    def _on_auto_exposure_changed(self, state):
+        """处理自动曝光模式变化"""
+        enabled = state == Qt.Checked
+        self._exposure_spinbox.setEnabled(not enabled and self._is_connected)
+        self.set_parameter_signal.emit("auto_exposure", enabled)
+
+    def _on_auto_gain_changed(self, state):
+        """处理自动增益模式变化"""
+        enabled = state == Qt.Checked
+        self._gain_spinbox.setEnabled(not enabled and self._is_connected)
+        self.set_parameter_signal.emit("auto_gain", enabled)
+
+    def _on_auto_wb_changed(self, state):
+        """处理自动白平衡模式变化"""
+        enabled = state == Qt.Checked
+        self._wb_slider.setEnabled(not enabled and self._is_connected)
+        self.set_parameter_signal.emit("auto_wb", enabled)
+
+    def _on_simulation_mode_changed(self, state):
+        """处理模拟模式变化"""
+        self.simulation_mode_changed.emit(state == Qt.Checked)
+
+    def _on_roi_selected_by_viewer(self, rect: QRectF):
         """图像查看器ROI选择事件"""
         # 从QRectF中提取坐标和尺寸
         x = rect.x()
@@ -531,14 +591,18 @@ class CameraView(BaseView):
         self._gain_spinbox.setEnabled(connected)
         self._trigger_mode_checkbox.setEnabled(connected)
         self._roi_button.setEnabled(connected)
-        self._exposure_spinbox.setEnabled(connected)
-        self._gain_spinbox.setEnabled(connected)
+        self._exposure_spinbox.setEnabled(self._is_connected and not self._auto_exposure_check.isChecked())
+        self._gain_spinbox.setEnabled(self._is_connected and not self._auto_gain_check.isChecked())
+        self._trigger_mode_checkbox.setEnabled(self._is_connected)
+        self._wb_slider.setEnabled(self._is_connected and not self._auto_wb_check.isChecked())
+        self._auto_exposure_check.setEnabled(self._is_connected)
+        self._auto_gain_check.setEnabled(self._is_connected)
+        self._auto_wb_check.setEnabled(self._is_connected)
         
-        if not connected:
-            # 断开连接时重置UI状态
-            self.update_streaming_status(False)
-            self._image_viewer.clear_all()
-            self._device_info_label.setText("未连接相机")
+        # ROI相关
+        self._roi_button.setEnabled(self._is_connected)
+        self._capture_button.setEnabled(True)
+        self._trigger_mode_checkbox.setEnabled(True)
     
     def update_streaming_status(self, streaming: bool):
         """

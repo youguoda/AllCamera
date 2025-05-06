@@ -9,6 +9,7 @@ from PyQt5.QtCore import pyqtSlot, QObject
 
 from UI.controllers.base_controller import BaseController
 from UI.models.camera_model import CameraModel
+from UI.views.camera_view import CameraView # Import CameraView
 from core.utils.logger import get_logger
 
 
@@ -198,7 +199,7 @@ class CameraController(BaseController):
     @pyqtSlot(result=str)
     def get_current_device_id(self) -> str:
         """
-        获取当前相机设备ID
+        获取当前连接的设备ID
         
         Returns:
             str: 当前相机设备ID
@@ -235,33 +236,51 @@ class CameraController(BaseController):
         """
         return self._model.get_status()
     
-    def setup_view_connections(self, view):
+    @pyqtSlot(bool)
+    def set_simulation_mode(self, enabled: bool):
+        """设置模拟模式"""
+        self.logger.info(f"设置模拟模式: {enabled}")
+        self._model.set_simulation_mode(enabled)
+        # 切换模式后，重新枚举设备以反映变化（模拟或真实）
+        self.enumerate_devices()
+        # 可能需要断开并重新连接，或者根据具体逻辑处理
+        # self.disconnect_camera()
+
+    def setup_view_connections(self, view: CameraView):
         """
-        设置控制器与视图之间的信号连接
+        设置视图和控制器之间的信号连接
         
         Args:
             view: 相机视图实例
         """
-        # 连接视图信号到控制器方法
-        view.connect_camera_signal.connect(self.connect_camera)     # 连接相机
-        view.disconnect_camera_signal.connect(self.disconnect_camera)   # 断开相机
-        view.start_streaming_signal.connect(self.start_streaming)   # 开始流式传输
-        view.stop_streaming_signal.connect(self.stop_streaming)     # 停止流式传输
-        view.trigger_once_signal.connect(self.trigger_once)          # 触发一次采集
-        view.set_parameter_signal.connect(self.set_parameter)        # 设置参数
-        view.set_roi_signal.connect(self.set_roi)                    # 设置ROI
-        view.reset_roi_signal.connect(self.reset_roi)                # 重置ROI
+        self.logger.info("设置视图连接")
         
-        # 连接模型信号到视图方法
-        self._model.connection_status_changed.connect(view.update_connection_status)  # 连接状态
-        self._model.streaming_status_changed.connect(view.update_streaming_status)    # 流式传输状态
-        self._model.new_frame_available.connect(view.update_frame)                    # 新帧
-        self._model.parameter_changed.connect(view.update_parameter)                  # 参数
-        self._model.camera_list_changed.connect(view.update_camera_list)              # 相机列表
-        self._model.fps_updated.connect(view.update_fps)                              # FPS更新
-        self._model.error_signal.connect(view.show_error)                             # 错误
-        self._model.status_changed.connect(view.update_status)                        # 状态
+        # 连接视图信号到控制器槽
+        view.connect_camera_signal.connect(self.connect_camera)
+        view.disconnect_camera_signal.connect(self.disconnect_camera)
+        view.start_streaming_signal.connect(self.start_streaming)
+        view.stop_streaming_signal.connect(self.stop_streaming)
+        view.trigger_once_signal.connect(self.trigger_once)
+        view.set_parameter_signal.connect(self.set_parameter)
+        view.set_roi_signal.connect(self.set_roi)
+        view.reset_roi_signal.connect(self.reset_roi)
+        view.simulation_mode_changed.connect(self.set_simulation_mode) # 连接模拟模式信号
+        
+        # 连接模型信号到视图槽
+        self._model.connection_status_changed.connect(view.update_connection_status)
+        self._model.streaming_status_changed.connect(view.update_streaming_status)
+        self._model.new_frame_available.connect(view.update_frame)
+        self._model.parameter_changed.connect(view.update_parameter)
+        self._model.camera_list_changed.connect(view.update_camera_list)
+        self._model.fps_updated.connect(view.update_fps)
+        # self._model.error_signal.connect(view.show_error_message)
+        self._model.status_changed.connect(view.update_status)
 
+    def initialize(self):
+        """初始化控制器"""
+        self.logger.info("初始化相机控制器")
+        # 可以在这里执行一些初始化逻辑，例如初始枚举设备
+        # self.enumerate_devices()
         
         # 初始化视图状态
         view.update_status(self._model.get_status())

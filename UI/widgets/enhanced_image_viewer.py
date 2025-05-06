@@ -749,6 +749,8 @@ class EnhancedImageViewer(QGraphicsView):
     def get_roi(self):
         """获取当前ROI矩形"""
         if self._roi_rect:
+            #记录返回的矩形，用于后续的ROI设置
+            print(self._roi_rect.rect())
             return self._roi_rect.rect()
         return None
     

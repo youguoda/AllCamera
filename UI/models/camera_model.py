@@ -62,7 +62,11 @@ class CameraModel(BaseModel):
         self._parameters = {
             "exposure": 0.0,
             "gain": 0.0,
-            "trigger_mode": False
+            "trigger_mode": False,
+            "white_balance": 50,  # 添加白平衡默认值 (假设范围0-100)
+            "auto_exposure": False, # 添加自动曝光默认值
+            "auto_gain": False,     # 添加自动增益默认值
+            "auto_wb": False        # 添加自动白平衡默认值
         }
         
         # 帧获取线程
@@ -128,6 +132,18 @@ class CameraModel(BaseModel):
             self.error_signal.emit(f"创建相机实例失败: 相机类型 '{camera_type}' 不存在")
             return []
     
+    def set_simulation_mode(self, enabled: bool):
+        """设置模拟模式"""
+        self._is_simulation = enabled
+        self.logger.info(f"模拟模式设置为: {enabled}")
+        # 如果相机已连接，可能需要重新初始化或应用设置
+        if self._camera:
+            self._camera._is_simulation = enabled
+            # 如果需要，可以在这里添加重新连接或更新设备列表的逻辑
+            # self.disconnect_camera()
+            # self.initialize_camera()
+            # self.enumerate_devices()
+    
     def connect_camera(self, device_id: str = "") -> bool:
         """
         连接相机
@@ -164,6 +180,14 @@ class CameraModel(BaseModel):
                     # 读取相机当前参数
                     self._parameters["exposure"] = self._camera.get_exposure()
                     self._parameters["gain"] = self._camera.get_gain()
+                    # 读取其他新增参数的初始值 (如果相机支持)
+                    # try:
+                    #     self._parameters["white_balance"] = self._camera.get_white_balance() # 假设有get_white_balance方法
+                    #     self._parameters["auto_exposure"] = self._camera.get_auto_exposure() # 假设有get_auto_exposure方法
+                    #     self._parameters["auto_gain"] = self._camera.get_auto_gain()       # 假设有get_auto_gain方法
+                    #     self._parameters["auto_wb"] = self._camera.get_auto_wb()           # 假设有get_auto_wb方法
+                    # except AttributeError:
+                    #     self.logger.warning("相机不支持读取部分新增参数的初始值")
                     
                     # 发送信号
                     self.connection_status_changed.emit(True)

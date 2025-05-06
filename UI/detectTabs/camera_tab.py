@@ -54,10 +54,10 @@ except ImportError as e:
 
 
 
-# Get logger instance
+# Get logger instance 获取日志记录器实例
 logger = get_logger()
 
-# --- Main Application Class ---
+# --- Main Application Class 主应用程序类 ---
 class CameraTabWidget(QMainWindow):
     """
     相机控制主窗口
@@ -113,38 +113,38 @@ class CameraTabWidget(QMainWindow):
 
     def _init_ui(self):
         """
-        初始化用户界面 (Based on the structure from the first code block - Original UI.py)
-        This method now sets up the central widget of the QMainWindow.
+        初始化用户界面 
+        设置了 QMainWindow 的中心部件
         """
-        # Main container widget
+        # 主容器部件
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
 
-        # Main layout for the central widget
+        # 中央部件的主布局
         self._main_layout = QVBoxLayout(main_widget)
         self._main_layout.setContentsMargins(SPACING["MEDIUM"], SPACING["MEDIUM"],
                                            SPACING["MEDIUM"], SPACING["MEDIUM"])
         self._main_layout.setSpacing(SPACING["MEDIUM"])
 
-        # --- Splitter for Preview and Control Panel ---
+        # --- 用于预览和控制面板的分割器 ---
         self._main_splitter = QSplitter(Qt.Horizontal)
         self._main_splitter.setChildrenCollapsible(False)
 
-        # --- Left Side: Preview Area ---
+        # --- 左侧: 预览区域 ---
         self._preview_widget = QWidget()
         self._preview_layout = QVBoxLayout(self._preview_widget)
         self._preview_layout.setContentsMargins(0, 0, 0, 0)
-        self._preview_layout.setSpacing(SPACING["SMALL"]) # Add spacing between toolbar and viewer
+        self._preview_layout.setSpacing(SPACING["SMALL"]) # 添加工具栏和查看器之间的间距
 
-        # -- Toolbar --
+        # --- 工具栏 ---
         self._toolbar = QWidget()
         self._toolbar_layout = QHBoxLayout(self._toolbar)
         self._toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        self._toolbar_layout.setSpacing(SPACING["SMALL"]) # Spacing between buttons
+        self._toolbar_layout.setSpacing(SPACING["SMALL"]) # 按钮之间的间距
 
-        # Connect Button
+        # 连接按钮
         self._connect_button = QPushButton("连接相机")
-        self._connect_button.setIcon(QIcon("./resources/icons/connect.png")) # Adjust path if needed
+        self._connect_button.setIcon(QIcon("./UI/resources/icons/connect.png")) 
         self._connect_button.setStyleSheet(f"""
             QPushButton {{ background-color: {LIGHT_COLORS["PRIMARY"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
             QPushButton:hover {{ background-color: {LIGHT_COLORS["PRIMARY_LIGHT"]}; }}
@@ -153,9 +153,9 @@ class CameraTabWidget(QMainWindow):
         """)
         self._toolbar_layout.addWidget(self._connect_button)
 
-        # Start/Stop Stream Button
+        # 开始/停止视频流按钮
         self._stream_button = QPushButton("开始视频流")
-        # self._stream_button.setIcon(QIcon("./resources/icons/play.png")) # Adjust path if needed
+        self._stream_button.setIcon(QIcon("./UI/resources/icons/PlayButton.png")) 
         self._stream_button.setEnabled(False)
         self._stream_button.setStyleSheet(f"""
             QPushButton {{ background-color: {LIGHT_COLORS["SUCCESS"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
@@ -165,9 +165,9 @@ class CameraTabWidget(QMainWindow):
         """)
         self._toolbar_layout.addWidget(self._stream_button)
 
-        # Capture Button (Mapped to Soft Trigger)
+        # 拍照 (软触发) 按钮
         self._capture_button = QPushButton("拍照 (软触发)")
-        # self._capture_button.setIcon(QIcon("./resources/icons/camera.png")) # Adjust path if needed
+        self._capture_button.setIcon(QIcon("./UI/resources/icons/camera.png")) 
         self._capture_button.setEnabled(False)
         self._capture_button.setStyleSheet(f"""
             QPushButton {{ background-color: {LIGHT_COLORS["INFO"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
@@ -177,7 +177,7 @@ class CameraTabWidget(QMainWindow):
         """)
         self._toolbar_layout.addWidget(self._capture_button)
 
-        # ROI Button
+        # ROI 选择按钮
         self._roi_button = QPushButton("选择ROI")
         self._roi_button.setCheckable(True)
         self._roi_button.setEnabled(False)
@@ -191,7 +191,7 @@ class CameraTabWidget(QMainWindow):
 
         self._toolbar_layout.addStretch()
 
-        # FPS Label (Overlay) - Create a container for the viewer + overlay
+        # FPS Label  - 为查看器创建一个容器 + 覆盖查看器上面
         self._viewer_container = QWidget()
         self._viewer_container_layout = QVBoxLayout(self._viewer_container)
         self._viewer_container_layout.setContentsMargins(0, 0, 0, 0)
@@ -206,11 +206,11 @@ class CameraTabWidget(QMainWindow):
         self._fps_label = QLabel("FPS: 0.0")
         self._fps_label.setStyleSheet("background-color: rgba(0, 0, 0, 0.5); color: lightgreen; font-size: 14px; padding: 2px 5px; border-radius: 3px;")
         self._fps_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
-        self._fps_label.setFixedSize(100, 25) # Adjust size as needed
-        self._fps_label.setParent(self._viewer_container) # Make it a child for positioning
-        # Move it to the top-right corner manually (adjust margins as needed)
+        self._fps_label.setFixedSize(100, 25) # 调整大小
+        self._fps_label.setParent(self._viewer_container) # 将其作为定位的子元素
+        # Move it to the top-right corner manually (adjust margins as needed)   
         self._fps_label.move(self._viewer_container.width() - self._fps_label.width() - 5, 5)
-        # Ensure it stays in position on resize
+        # 确保在调整大小时它能保持在原位置。
         self._viewer_container.resizeEvent = self._on_viewer_resize
 
 
@@ -218,13 +218,15 @@ class CameraTabWidget(QMainWindow):
         self._preview_layout.addWidget(self._toolbar)
         self._preview_layout.addWidget(self._viewer_container, 1) # Viewer takes available space
 
-        # --- Right Side: Control Panel ---
+        # --- 右侧控制面板 ---
         self._control_widget = QWidget()
         self._control_layout = QVBoxLayout(self._control_widget)
-        self._control_layout.setContentsMargins(SPACING["SMALL"], 0, 0, 0) # Add left margin
+        self._control_layout.setContentsMargins(SPACING["SMALL"], 0, 0, 0) # 添加左边距
+        
+        self._control_widget.setMinimumWidth(450)  # 设置右侧控制面板最小宽度
         self._control_layout.setSpacing(SPACING["MEDIUM"])
 
-        # -- 1. Camera List Panel --
+        # --- 1. 相机列表面板 ---
         self._camera_list_panel = CollapsiblePanel("相机连接与选择", self)
         camera_list_content = QWidget()
         self._camera_list_layout = QVBoxLayout(camera_list_content)
@@ -252,7 +254,7 @@ class CameraTabWidget(QMainWindow):
 
         self._camera_list_panel.add_widget(camera_list_content)
 
-        # -- 2. Camera Parameters Panel --
+        # --- 2. 相机参数面板 ---
         self._camera_params_panel = CollapsiblePanel("相机参数", self)
         camera_params_content = QWidget()
         self._camera_params_layout = QGridLayout(camera_params_content)
@@ -307,7 +309,7 @@ class CameraTabWidget(QMainWindow):
         self._camera_params_panel.add_widget(camera_params_content)
 
 
-        # -- 3. Image Settings Panel --
+        # -- 3. 图像设置面板 --
         self._image_settings_panel = CollapsiblePanel("图像与触发", self)
         image_settings_content = QWidget()
         self._image_settings_layout = QGridLayout(image_settings_content)
@@ -345,7 +347,7 @@ class CameraTabWidget(QMainWindow):
 
         self._image_settings_panel.add_widget(image_settings_content)
 
-        # -- 4. Status Panel --
+        # -- 4. 状态信息面板 --
         self._status_panel = CollapsiblePanel("状态信息", self)
         status_content = QWidget()
         self._status_layout = QVBoxLayout(status_content)
@@ -385,7 +387,7 @@ class CameraTabWidget(QMainWindow):
         self._update_ui_state()
 
     def _on_viewer_resize(self, event):
-        """手柄查看器调整大小以重新定位 FPS 标签。"""
+        """当图像查看器容器大小改变时，重新计算并移动 FPS 标签到右上角"""
         # Default resize event handler
         QWidget.resizeEvent(self._viewer_container, event)
         # Reposition FPS label
@@ -402,7 +404,7 @@ class CameraTabWidget(QMainWindow):
         self._simulation_check.stateChanged.connect(self.toggle_simulation_mode)
         self._camera_combo.currentIndexChanged.connect(self._on_camera_selection_change) # May not be needed if using button
 
-        # Streaming and Capture Controls
+        # 视频流与拍照控制
         self._stream_button.clicked.connect(self.toggle_stream) # Combined start/stop method
         self._capture_button.clicked.connect(self.trigger_once) # Map capture to soft trigger
 
@@ -421,7 +423,7 @@ class CameraTabWidget(QMainWindow):
 
         self._apply_params_btn.clicked.connect(self.apply_parameters)
 
-        # Image/Trigger Settings Controls
+        # 图像/触发设置控件
         self._fps_spin.valueChanged.connect(self._on_fps_spin_changed) # Update target FPS
         self._trigger_combo.currentIndexChanged.connect(self.change_trigger_mode)
         # TODO: 连接分辨率和像素格式组合（如果实现的话）
@@ -441,13 +443,13 @@ class CameraTabWidget(QMainWindow):
     # --- UI Update and State Management ---
 
     def _update_ui_state(self):
-        """Updates the enabled/disabled state and text of UI elements based on camera state."""
+        """根据相机状态更新用户界面元素的启用/禁用状态和文本。"""
         connected = self._camera_connected
         streaming = self.is_running
 
-        # Connection controls
+        # 连接控制
         self._connect_button.setText("断开相机" if connected else "连接相机")
-        self._connect_button.setStyleSheet( # Update style based on state
+        self._connect_button.setStyleSheet( # 根据状态更新样式
              f"""
             QPushButton {{ background-color: {LIGHT_COLORS["DANGER"] if connected else LIGHT_COLORS["PRIMARY"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
             QPushButton:hover {{ background-color: {LIGHT_COLORS["DANGER"] if connected else LIGHT_COLORS["PRIMARY"]}; }}
@@ -460,10 +462,11 @@ class CameraTabWidget(QMainWindow):
         self._simulation_check.setEnabled(not connected)
 
 
-        # Streaming/Capture controls
+        # 流传输/拍照控制
         self._stream_button.setEnabled(connected)
         self._stream_button.setText("停止视频流" if streaming else "开始视频流")
-        self._stream_button.setStyleSheet( # Update style based on state
+        self._stream_button.setIcon(QIcon("./UI/resources/icons/Stop-Button.png") if streaming else QIcon("./UI/resources/icons/PlayButton.png"))
+        self._stream_button.setStyleSheet( # 基于状态更新样式
             f"""
             QPushButton {{ background-color: {LIGHT_COLORS["DANGER"] if streaming else LIGHT_COLORS["SUCCESS"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
             QPushButton:hover {{ background-color: {LIGHT_COLORS["DANGER"] if streaming else LIGHT_COLORS["SUCCESS"]}; }}
@@ -472,20 +475,19 @@ class CameraTabWidget(QMainWindow):
             """
         )
 
-        # Capture (Trigger) button enabled only if connected, streaming, and in trigger mode
+        # 仅当已连接、正在流式传输且处于触发模式时，捕获（触发）按钮才启用
         trigger_mode_index = self._trigger_combo.currentIndex()
         can_trigger = connected and streaming and trigger_mode_index > 0 # Only for Soft/Hard trigger
         self._capture_button.setEnabled(can_trigger)
 
 
-        # ROI button
+        # ROI 按钮
         self._roi_button.setEnabled(connected and self._image_viewer.get_viewer().pixmap() is not None) # Enable if image is shown
         if not self._roi_button.isEnabled() and self._roi_button.isChecked():
             self._roi_button.setChecked(False) # Uncheck if disabled
             self._image_viewer.get_viewer().set_interaction_mode(InteractionMode.VIEW)
 
-
-        # Parameter controls
+        # 参数控制
         manual_params_enabled = connected and not streaming # Params usually set when not streaming
         self._exposure_slider.setEnabled(manual_params_enabled and not self._auto_exposure_check.isChecked())
         self._gain_slider.setEnabled(manual_params_enabled and not self._auto_gain_check.isChecked())
@@ -497,12 +499,12 @@ class CameraTabWidget(QMainWindow):
         self._auto_gain_check.setEnabled(manual_params_enabled)
         self._auto_wb_check.setEnabled(manual_params_enabled)
 
-        # Image/Trigger settings
-        # Resolution/Pixel Format typically set when not connected or not streaming
+        # 图像/触发设置
+        # 分辨率/像素格式通常在未连接或未流式传输时设置
         can_change_img_settings = connected and not streaming
-        self._resolution_combo.setEnabled(False) # Disabled for now, enable if implemented
-        self._pixel_format_combo.setEnabled(False) # Disabled for now, enable if implemented
-        self._trigger_combo.setEnabled(connected) # Can change trigger mode when connected
+        self._resolution_combo.setEnabled(False) # 现在禁用，如果实现则启用
+        self._pixel_format_combo.setEnabled(False) # 现在禁用，如果实现则启用
+        self._trigger_combo.setEnabled(connected) # 可以在连接时更改触发模式
 
     def _on_camera_selection_change(self, index):
         """Handle manual camera selection if needed."""
@@ -521,22 +523,21 @@ class CameraTabWidget(QMainWindow):
 
     def _on_roi_selected_from_viewer(self, rect):
         """Handle ROI selection confirmed from the viewer."""
-        # Automatically uncheck the button and switch back to view mode
+        # 自动取消选中该按钮并切换回查看模式
         self._roi_button.setChecked(False)
         self._image_viewer.get_viewer().set_interaction_mode(InteractionMode.VIEW)
 
         # Process the selected ROI (e.g., send to camera if supported)
         x, y, w, h = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
         self.log_status(f"选择ROI: x={x}, y={y}, w={w}, h={h} (应用ROI需相机支持)")
-        # TODO:如果可用， 在这里添加调用self.camera.set_roi(x, y, w, h)的逻辑
+        # 添加调用self.camera.set_roi(x, y, w, h)的逻辑
+        self.camera.set_roi(x, y, w, h)
 
     def _on_exposure_slider_changed(self, value):
         self._exposure_value_label.setText(f"{value} μs")
-
     def _on_gain_slider_changed(self, value):
-        # Assuming slider range 0-20 maps to dB directly
+        # 假设滑块范围0 - 20直接映射到dB
         self._gain_value_label.setText(f"{value} dB")
-
     def _on_wb_slider_changed(self, value):
         self._wb_value_label.setText(f"{value} K")
 
@@ -1197,7 +1198,7 @@ class CameraTabWidget(QMainWindow):
         super().closeEvent(event)
 
 
-# --- Main Execution ---
+# --- Main Execution Main执行 ---
 def main():
     """Main function to run the application."""
     app = QApplication(sys.argv)
@@ -1211,7 +1212,7 @@ def main():
 
 if __name__ == "__main__":
     # 确保存在必要的目录（例如，用于日志）
-    log_dir = os.path.join(project_root, 'logs') # Example log dir
+    log_dir = os.path.join(project_root, 'logs') # Example log dir 示例日志目录
     os.makedirs(log_dir, exist_ok=True)
 
     main()
