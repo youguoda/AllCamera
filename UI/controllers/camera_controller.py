@@ -7,280 +7,192 @@ import numpy as np
 
 from PyQt5.QtCore import pyqtSlot, QObject
 
-from UI.controllers.base_controller import BaseController
+# from UI.controllers.base_controller import BaseController
 from UI.models.camera_model import CameraModel
-from UI.views.camera_view import CameraView # Import CameraView
+from UI.views.camera_view import CameraView
 from core.utils.logger import get_logger
 
 
-class CameraController(BaseController):
+class CameraController(QObject): # QObject for signals/slots if not inheriting BaseController
     """
     相机控制器类
     处理与相机相关的业务逻辑和UI交互
     """
-    
-    def __init__(self, model: CameraModel):
-        """
-        初始化相机控制器
-        
-        Args:
-            model: 相机模型实例
-        """
-        super().__init__()
+
+    def __init__(self, model: CameraModel, view: CameraView, parent: Optional[QObject] = None):
+        super().__init__(parent)
         self.logger = get_logger()
-        
-        # 保存模型引用
+
         self._model = model
-    
-    def enumerate_devices(self) -> List[Dict[str, Any]]:
-        """
-        枚举可用的相机设备
+        self._view = view
+
+        self._connect_signals()
+        self.initialize_controller_state()
+
+    def _connect_signals(self):
+        """连接模型、视图和控制器之间的信号与槽。"""
+        self.logger.info("Connecting MVC signals for Camera...")
+
+        # --- 视图信号 -> 控制器槽 ---
+        self._view.refresh_devices_requested.connect(self._handle_refresh_devices)
+        self._view.connect_button_clicked.connect(self._handle_connect_disconnect)
+        self._view.simulation_mode_toggled.connect(self._handle_simulation_mode_toggled)
+        self._view.device_selection_changed.connect(self._handle_device_selection_changed) # May not be needed if connect uses current combo value
+
+        self._view.stream_button_clicked.connect(self._handle_stream_toggle)
+        self._view.trigger_button_clicked.connect(self._handle_trigger_button)
+        self._view.roi_button_toggled.connect(self._handle_roi_mode_toggled) # View toggles ROI mode in viewer
+
+        self._view.parameter_changed_by_user.connect(self._handle_single_parameter_change_from_ui)
+        self._view.apply_all_parameters_requested.connect(self._handle_apply_all_parameters)
+
+
+        # --- 模型信号 -> 控制器槽 (控制器再更新视图) ---
+        self._model.connection_status_changed.connect(self._on_model_connection_status_changed)
+        self._model.streaming_status_changed.connect(self._on_model_streaming_status_changed)
+        self._model.camera_list_updated.connect(self._on_model_camera_list_updated)
+        self._model.simulation_mode_status_changed.connect(self._on_model_simulation_mode_changed)
+
+        self._model.new_frame_available.connect(self._on_model_new_frame)
+        self._model.fps_updated.connect(self._view.update_fps_display) #可以直接连接
+
+        self._model.parameters_updated.connect(self._on_model_parameters_updated)
+        # self._model.single_parameter_updated.connect(self._on_model_single_parameter_updated) # Covered by parameters_updated
+
+        self._model.error_occurred.connect(self._view.show_error_message) # 直接连接
+        self._model.status_message_updated.connect(self._view.show_status_message) # 直接连接
+
+    def initialize_controller_state(self):
+        """初始化控制器状态，例如获取初始设备列表和参数。"""
+        self.logger.info("Initializing CameraController state...")
+        self._model.enumerate_devices() # 请求模型枚举设备
+        # 视图将通过 camera_list_updated 信号更新
         
-        Returns:
-            List[Dict[str, Any]]: 可用相机设备列表
-        """
-        self.logger.info("枚举相机设备")
-        return self._model.enumerate_devices()
-    
-    @pyqtSlot(str, result=bool)
-    def connect_camera(self, device_id: str = "") -> bool:
-        """
-        连接相机
+        initial_params = self._model.get_all_parameters()
+        self._view.update_parameters_display(initial_params)
         
-        Args:
-            device_id: 相机设备ID
-            
-        Returns:
-            bool: 是否成功连接
-        """
-        self.logger.info(f"连接相机: {device_id}")
-        return self._model.connect_camera(device_id)
-    
-    @pyqtSlot(result=bool)
-    def disconnect_camera(self) -> bool:
-        """
-        断开相机连接
-        
-        Returns:
-            bool: 是否成功断开
-        """
-        self.logger.info("断开相机连接")
-        return self._model.disconnect_camera()
-    
-    @pyqtSlot(result=bool)
-    def start_streaming(self) -> bool:
-        """
-        开始图像流
-        
-        Returns:
-            bool: 是否成功开始流式传输
-        """
-        self.logger.info("开始相机图像流")
-        return self._model.start_streaming()
-    
-    @pyqtSlot(result=bool)
-    def stop_streaming(self) -> bool:
-        """
-        停止图像流
-        
-        Returns:
-            bool: 是否成功停止流式传输
-        """
-        self.logger.info("停止相机图像流")
-        return self._model.stop_streaming()
-    
-    @pyqtSlot(result=bool)
-    def trigger_once(self) -> bool:
-        """
-        触发一次采集
-        
-        Returns:
-            bool: 是否成功触发
-        """
-        self.logger.info("触发相机采集一次")
-        return self._model.trigger_once()
-    
-    @pyqtSlot(str, object, result=bool)
-    def set_parameter(self, param_name: str, value: Any) -> bool:
-        """
-        设置相机参数
-        
-        Args:
-            param_name: 参数名称
-            value: 参数值
-            
-        Returns:
-            bool: 是否成功设置
-        """
-        self.logger.info(f"设置相机参数: {param_name}={value}")
-        return self._model.set_parameter(param_name, value)
-    
-    @pyqtSlot(str, result=object)
-    def get_parameter(self, param_name: str) -> Any:
-        """
-        获取相机参数
-        
-        Args:
-            param_name: 参数名称
-            
-        Returns:
-            Any: 参数值
-        """
-        return self._model.get_parameter(param_name)
-    
-    @pyqtSlot(int, int, int, int, result=bool)
-    def set_roi(self, x: int, y: int, width: int, height: int) -> bool:
-        """
-        设置ROI区域
-        
-        Args:
-            x: 左上角x坐标
-            y: 左上角y坐标
-            width: 宽度
-            height: 高度
-            
-        Returns:
-            bool: 是否成功设置
-        """
-        self.logger.info(f"设置相机ROI: x={x}, y={y}, width={width}, height={height}")
-        return self._model.set_roi(x, y, width, height)
-    
-    @pyqtSlot(result=bool)
-    def reset_roi(self) -> bool:
-        """
-        重置ROI区域
-        
-        Returns:
-            bool: 是否成功重置
-        """
-        self.logger.info("重置相机ROI")
-        return self._model.reset_roi()
-    
-    @pyqtSlot(result=tuple)
-    def get_roi(self) -> Tuple[int, int, int, int]:
-        """
-        获取ROI区域
-        
-        Returns:
-            Tuple[int, int, int, int]: (x, y, width, height)
-        """
-        return self._model.get_roi()
-    
-    @pyqtSlot(result=bool)
-    def is_connected(self) -> bool:
-        """
-        检查相机是否已连接
-        
-        Returns:
-            bool: 是否已连接
-        """
-        return self._model.is_connected()
-    
-    @pyqtSlot(result=bool)
-    def is_streaming(self) -> bool:
-        """
-        检查相机是否正在流式传输
-        
-        Returns:
-            bool: 是否正在流式传输
-        """
-        return self._model.is_streaming()
-    
-    @pyqtSlot(result=dict)
-    def get_current_frame(self) -> Optional[np.ndarray]:
-        """
-        获取当前帧
-        
-        Returns:
-            Optional[np.ndarray]: 当前帧图像
-        """
-        return self._model.get_current_frame()
-    
-    @pyqtSlot(result=str)
-    def get_current_device_id(self) -> str:
-        """
-        获取当前连接的设备ID
-        
-        Returns:
-            str: 当前相机设备ID
-        """
-        return self._model.get_current_device_id()
-    
-    @pyqtSlot(result=list)
-    def get_available_devices(self) -> List[Dict[str, Any]]:
-        """
-        获取可用的相机设备列表
-        
-        Returns:
-            List[Dict[str, Any]]: 可用相机设备列表
-        """
-        return self._model.get_available_devices()
-    
-    @pyqtSlot(result=dict)
-    def get_device_info(self) -> Dict[str, Any]:
-        """
-        获取相机设备信息
-        
-        Returns:
-            Dict[str, Any]: 相机设备信息
-        """
-        return self._model.get_device_info()
-    
-    @pyqtSlot(result=dict)
-    def get_status(self) -> Dict[str, Any]:
-        """
-        获取相机状态
-        
-        Returns:
-            Dict[str, Any]: 相机状态信息
-        """
-        return self._model.get_status()
-    
+        initial_status = self._model.get_status_summary()
+        self._view.update_ui_enable_states(
+            is_connected=initial_status.get("is_connected", False),
+            is_streaming=initial_status.get("is_streaming", False)
+        )
+        self._view.update_simulation_mode_checkbox(initial_status.get("is_simulation_mode", False))
+
+
+    # --- 视图信号处理槽 ---
+    @pyqtSlot()
+    def _handle_refresh_devices(self):
+        self.logger.info("Controller: Refresh devices requested.")
+        self._model.enumerate_devices()
+
+    @pyqtSlot()
+    def _handle_connect_disconnect(self):
+        self.logger.info("Controller: Connect/Disconnect button clicked.")
+        if self._model.get_status_summary().get("is_connected"):
+            self._model.disconnect_camera()
+        else:
+            selected_device_id = self._view.get_current_selected_device_id()
+            # selected_device_id can be None if "自动选择" is selected and it has None as userData
+            if selected_device_id is None or selected_device_id == "": 
+                self.logger.info("Controller: Attempting to connect to auto-selected device.")
+                self._model.connect_camera("") # Model handles empty string for auto-selection
+            else:
+                self.logger.info(f"Controller: Attempting to connect to device: {selected_device_id}")
+                self._model.connect_camera(selected_device_id)
+
     @pyqtSlot(bool)
-    def set_simulation_mode(self, enabled: bool):
-        """设置模拟模式"""
-        self.logger.info(f"设置模拟模式: {enabled}")
+    def _handle_simulation_mode_toggled(self, enabled: bool):
+        self.logger.info(f"Controller: Simulation mode toggled to {enabled}.")
         self._model.set_simulation_mode(enabled)
-        # 切换模式后，重新枚举设备以反映变化（模拟或真实）
-        self.enumerate_devices()
-        # 可能需要断开并重新连接，或者根据具体逻辑处理
-        # self.disconnect_camera()
 
-    def setup_view_connections(self, view: CameraView):
-        """
-        设置视图和控制器之间的信号连接
-        
-        Args:
-            view: 相机视图实例
-        """
-        self.logger.info("设置视图连接")
-        
-        # 连接视图信号到控制器槽
-        view.connect_camera_signal.connect(self.connect_camera)
-        view.disconnect_camera_signal.connect(self.disconnect_camera)
-        view.start_streaming_signal.connect(self.start_streaming)
-        view.stop_streaming_signal.connect(self.stop_streaming)
-        view.trigger_once_signal.connect(self.trigger_once)
-        view.set_parameter_signal.connect(self.set_parameter)
-        view.set_roi_signal.connect(self.set_roi)
-        view.reset_roi_signal.connect(self.reset_roi)
-        view.simulation_mode_changed.connect(self.set_simulation_mode) # 连接模拟模式信号
-        
-        # 连接模型信号到视图槽
-        self._model.connection_status_changed.connect(view.update_connection_status)
-        self._model.streaming_status_changed.connect(view.update_streaming_status)
-        self._model.new_frame_available.connect(view.update_frame)
-        self._model.parameter_changed.connect(view.update_parameter)
-        self._model.camera_list_changed.connect(view.update_camera_list)
-        self._model.fps_updated.connect(view.update_fps)
-        # self._model.error_signal.connect(view.show_error_message)
-        self._model.status_changed.connect(view.update_status)
+    @pyqtSlot(str)
+    def _handle_device_selection_changed(self, device_id: str):
+        self.logger.info(f"Controller: Device selection changed in view to: {device_id if device_id else 'Auto'}.")
+        # No direct action usually, connect button will use the current selection.
+        # If immediate connection on selection is desired, logic would go here.
 
-    def initialize(self):
-        """初始化控制器"""
-        self.logger.info("初始化相机控制器")
-        # 可以在这里执行一些初始化逻辑，例如初始枚举设备
-        # self.enumerate_devices()
-        
-        # 初始化视图状态
-        view.update_status(self._model.get_status())
+    @pyqtSlot()
+    def _handle_stream_toggle(self):
+        self.logger.info("Controller: Stream toggle button clicked.")
+        if self._model.get_status_summary().get("is_streaming"):
+            self._model.stop_streaming()
+        else:
+            self._model.start_streaming()
+
+    @pyqtSlot()
+    def _handle_trigger_button(self):
+        self.logger.info("Controller: Trigger button clicked.")
+        self._model.trigger_software()
+
+    @pyqtSlot(bool)
+    def _handle_roi_mode_toggled(self, is_roi_mode: bool):
+        self.logger.info(f"Controller: ROI selection mode toggled to {is_roi_mode}.")
+        # View handles ImageViewer mode. Controller could do more if needed.
+
+    @pyqtSlot(str, object)
+    def _handle_single_parameter_change_from_ui(self, param_name: str, value: Any):
+        self.logger.info(f"Controller: UI changed parameter '{param_name}' to '{value}'.")
+        if param_name == "roi_from_viewer" and isinstance(value, tuple) and len(value) == 4:
+            x, y, w, h = value
+            params_to_set = {"roi_x": x, "roi_y": y, "roi_width": w, "roi_height": h}
+            self._model.set_parameters(params_to_set)
+        else:
+            self._model.set_parameters({param_name: value})
+
+    @pyqtSlot(dict)
+    def _handle_apply_all_parameters(self, params: Dict[str, Any]):
+        self.logger.info(f"Controller: Apply all parameters requested: {params}")
+        self._model.set_parameters(params)
+
+    # --- 模型信号处理槽 ---
+    @pyqtSlot(bool, str)
+    def _on_model_connection_status_changed(self, is_connected: bool, device_id: str):
+        self.logger.info(f"Controller: Model connection status changed: {is_connected}, Device: '{device_id}'")
+        self._view.update_connection_status(is_connected, device_id)
+        current_streaming = self._model.get_status_summary().get("is_streaming", False)
+        self._view.update_ui_enable_states(is_connected, current_streaming and is_connected) # Stream can only be true if connected
+
+    @pyqtSlot(bool)
+    def _on_model_streaming_status_changed(self, is_streaming: bool):
+        self.logger.info(f"Controller: Model streaming status changed: {is_streaming}")
+        self._view.update_streaming_status(is_streaming)
+        current_connected = self._model.get_status_summary().get("is_connected", False)
+        self._view.update_ui_enable_states(current_connected, is_streaming)
+
+    @pyqtSlot(list)
+    def _on_model_camera_list_updated(self, devices: List[Dict[str, Any]]):
+        self.logger.info(f"Controller: Model camera list updated. Found {len(devices)} devices.")
+        current_model_device_id = self._model.get_status_summary().get("current_device_id")
+        self._view.update_available_devices(devices, current_model_device_id)
+
+    @pyqtSlot(bool)
+    def _on_model_simulation_mode_changed(self, is_simulation: bool):
+        self.logger.info(f"Controller: Model simulation mode status changed: {is_simulation}")
+        self._view.update_simulation_mode_checkbox(is_simulation)
+        status_summary = self._model.get_status_summary()
+        self._view.update_ui_enable_states(
+            status_summary.get("is_connected", False),
+            status_summary.get("is_streaming", False)
+        )
+
+    @pyqtSlot(np.ndarray, str)
+    def _on_model_new_frame(self, frame: np.ndarray, camera_id: str):
+        # self.logger.debug(f"Controller: New frame from cam {camera_id}") # Potentially spammy
+        self._view.display_frame(frame)
+
+    @pyqtSlot(dict)
+    def _on_model_parameters_updated(self, params: Dict[str, Any]):
+        self.logger.info(f"Controller: Model parameters updated: {list(params.keys())}")
+        self._view.update_parameters_display(params)
+        status_summary = self._model.get_status_summary()
+        self._view.update_ui_enable_states(
+            status_summary.get("is_connected", False),
+            status_summary.get("is_streaming", False)
+        )
+
+    def cleanup(self):
+        """Perform cleanup actions for the controller."""
+        self.logger.info("Cleaning up CameraController...")
+        # Model and View should handle their own cleanup if they are QObjects and managed by Qt's parent-child system
+        # Or if they have explicit cleanup methods that need to be called.
+        # self._model.cleanup() # If model has a cleanup method

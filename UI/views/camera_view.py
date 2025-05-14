@@ -4,20 +4,19 @@
 """
 from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
-import time
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QSize
 from PyQt5.QtGui import QImage, QPixmap, QIcon
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QComboBox, QSlider, QSpinBox, QCheckBox, QSplitter, QMessageBox,
-    QGroupBox, QFormLayout, QLineEdit, QDoubleSpinBox
+    QDoubleSpinBox # 确保 QDoubleSpinBox 已导入
 )
 
-from UI.views.base_view import BaseView
+from UI.views.base_view import BaseView # 假设存在
 from UI.widgets.enhanced_image_viewer import ImageViewerWidget, InteractionMode
 from UI.widgets.collapsible_panel import CollapsiblePanel
-from UI.utils.ui_constants import LIGHT_COLORS, SPACING
+from UI.utils.ui_constants import LIGHT_COLORS, SPACING # 假设存在
 from core.utils.logger import get_logger
 
 
@@ -26,685 +25,537 @@ class CameraView(BaseView):
     相机视图类
     提供相机控制和图像显示的用户界面
     """
-    
-    # 自定义信号
-    connect_camera_signal = pyqtSignal(str)   # 连接相机信号
-    disconnect_camera_signal = pyqtSignal()   # 断开相机信号
-    start_streaming_signal = pyqtSignal()    # 开始流式传输信号
-    stop_streaming_signal = pyqtSignal()     # 停止流式传输信号
-    trigger_once_signal = pyqtSignal()        # 触发一次信号
-    set_parameter_signal = pyqtSignal(str, object)   # 设置参数信号
-    set_roi_signal = pyqtSignal(int, int, int, int)   # 设置ROI信号
-    reset_roi_signal = pyqtSignal()           # 重置ROI信号
-    simulation_mode_changed = pyqtSignal(bool) # 模拟模式切换信号
-    
-    def __init__(self, parent=None):
-        """
-        初始化相机视图
-        
-        Args:
-            parent: 父级窗口部件
-        """
+
+    # --- 用户操作信号 ---
+    refresh_devices_requested = pyqtSignal()
+    connect_button_clicked = pyqtSignal() # 连接/断开按钮被点击
+    simulation_mode_toggled = pyqtSignal(bool)
+    device_selection_changed = pyqtSignal(str) # 参数为选中的 device_id
+
+    stream_button_clicked = pyqtSignal() # 开始/停止流按钮被点击
+    trigger_button_clicked = pyqtSignal() # 软触发按钮
+    roi_button_toggled = pyqtSignal(bool) # ROI选择模式切换
+
+    # 参数相关信号
+    parameter_changed_by_user = pyqtSignal(str, object) # (param_name, value) 当用户通过控件修改时
+    apply_all_parameters_requested = pyqtSignal(dict) # 请求应用当前UI上的所有参数
+
+    # ROI SpinBox 值改变信号 (如果需要直接通过spinbox设置ROI)
+    # roi_spinbox_changed = pyqtSignal(str, int) # (roi_param_name, value)
+
+    def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.logger = get_logger()
-        
-        # 状态变量
-        self._is_connected = False    # 是否已连接相机
-        self._is_streaming = False    # 是否正在流式传输
-        self._current_device_id = ""  # 当前连接的相机设备ID
-        self._available_devices = []  # 可用的相机设备列表
-        self._current_fps = 0.0       # 当前帧率
-        
-        # 图像相关
-        self._current_frame = None      # 当前帧数据
-        self._last_update_time = time.time()    # 上次更新时间
-        
-        # UI更新定时器
-        self._ui_timer = QTimer(self)
-        self._ui_timer.timeout.connect(self._update_ui_timer)
-        self._ui_timer.start(30)  # 30毫秒更新一次
-        
-        # 设置UI
+        self.setWindowTitle("相机控制视图") # 可以由外部设置
         self._setup_ui()
-    
+        self._connect_ui_signals()
+        self.update_ui_enable_states(is_connected=False, is_streaming=False) # 初始禁用多数控件
+
     def _setup_ui(self):
-        """设置UI组件"""
-        # 主布局
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(SPACING["MEDIUM"], SPACING["MEDIUM"],
-                                      SPACING["MEDIUM"], SPACING["MEDIUM"])
+        main_layout.setContentsMargins(SPACING["MEDIUM"], SPACING["MEDIUM"], SPACING["MEDIUM"], SPACING["MEDIUM"])
         main_layout.setSpacing(SPACING["MEDIUM"])
-        
-        # 创建分割器
+
         self._main_splitter = QSplitter(Qt.Horizontal)
         self._main_splitter.setChildrenCollapsible(False)
-        
+
         # --- 左侧: 预览区域 ---
-        self._preview_widget = QWidget()
-        self._preview_layout = QVBoxLayout(self._preview_widget)
-        self._preview_layout.setContentsMargins(0, 0, 0, 0)
-        self._preview_layout.setSpacing(SPACING["SMALL"])
-        
+        preview_widget = QWidget()
+        preview_layout = QVBoxLayout(preview_widget)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(SPACING["SMALL"])
+
         # 工具栏
-        self._toolbar = QWidget()
-        self._toolbar_layout = QHBoxLayout(self._toolbar)
-        self._toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        self._toolbar_layout.setSpacing(SPACING["SMALL"])
-        
-        # 连接按钮
+        toolbar = QWidget()
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(SPACING["SMALL"])
+
         self._connect_button = QPushButton("连接相机")
-        self._connect_button.setIcon(QIcon("./UI/resources/icons/connect.png"))
+        self._connect_button.setIcon(QIcon("./UI/resources/icons/connect.png")) # 路径可能需要调整
         self._connect_button.setStyleSheet(f"""
             QPushButton {{ background-color: {LIGHT_COLORS["PRIMARY"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
             QPushButton:hover {{ background-color: {LIGHT_COLORS["PRIMARY_LIGHT"]}; }}
             QPushButton:pressed {{ background-color: {LIGHT_COLORS["PRIMARY_DARK"]}; }}
             QPushButton:disabled {{ background-color: {LIGHT_COLORS["DISABLED"]}; color: {LIGHT_COLORS["TEXT_DISABLED"]}; }}
         """)
-        self._toolbar_layout.addWidget(self._connect_button)
-        
-        # 开始/停止视频流按钮
+        toolbar_layout.addWidget(self._connect_button)
+
         self._stream_button = QPushButton("开始视频流")
-        self._stream_button.setEnabled(False)
+        self._stream_button.setIcon(QIcon("./UI/resources/icons/PlayButton.png"))
         self._stream_button.setStyleSheet(f"""
             QPushButton {{ background-color: {LIGHT_COLORS["SUCCESS"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
-            QPushButton:hover {{ background-color: {LIGHT_COLORS["SUCCESS_LIGHT"]}; }}
-            QPushButton:pressed {{ background-color: {LIGHT_COLORS["SUCCESS_DARK"]}; }}
+            QPushButton:hover {{ background-color: {LIGHT_COLORS["SUCCESS_LIGHT"] if "SUCCESS_LIGHT" in LIGHT_COLORS else LIGHT_COLORS["SUCCESS"]}; }}
+            QPushButton:pressed {{ background-color: {LIGHT_COLORS["SUCCESS_DARK"] if "SUCCESS_DARK" in LIGHT_COLORS else LIGHT_COLORS["SUCCESS"]}; }}
             QPushButton:disabled {{ background-color: {LIGHT_COLORS["DISABLED"]}; color: {LIGHT_COLORS["TEXT_DISABLED"]}; }}
         """)
-        self._toolbar_layout.addWidget(self._stream_button)
-        
-        # 拍照按钮
-        self._capture_button = QPushButton("拍照 (软触发)")
-        self._capture_button.setEnabled(False)
-        self._capture_button.setStyleSheet(f"""
+        toolbar_layout.addWidget(self._stream_button)
+
+        self._trigger_button = QPushButton("拍照 (软触发)") # 对应原 _capture_button
+        self._trigger_button.setIcon(QIcon("./UI/resources/icons/camera.png"))
+        self._trigger_button.setStyleSheet(f"""
             QPushButton {{ background-color: {LIGHT_COLORS["INFO"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
-            QPushButton:hover {{ background-color: {LIGHT_COLORS["INFO_LIGHT"]}; }}
-            QPushButton:pressed {{ background-color: {LIGHT_COLORS["INFO_DARK"]}; }}
+            QPushButton:hover {{ background-color: {LIGHT_COLORS["INFO_LIGHT"] if "INFO_LIGHT" in LIGHT_COLORS else LIGHT_COLORS["INFO"]}; }}
+            QPushButton:pressed {{ background-color: {LIGHT_COLORS["INFO_DARK"] if "INFO_DARK" in LIGHT_COLORS else LIGHT_COLORS["INFO"]}; }}
             QPushButton:disabled {{ background-color: {LIGHT_COLORS["DISABLED"]}; color: {LIGHT_COLORS["TEXT_DISABLED"]}; }}
         """)
-        self._toolbar_layout.addWidget(self._capture_button)
-        
-        # ROI按钮
+        toolbar_layout.addWidget(self._trigger_button)
+
         self._roi_button = QPushButton("选择ROI")
         self._roi_button.setCheckable(True)
-        self._roi_button.setEnabled(False)
         self._roi_button.setStyleSheet(f"""
             QPushButton {{ background-color: {LIGHT_COLORS["WARNING"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
-            QPushButton:hover {{ background-color: {LIGHT_COLORS["WARNING_LIGHT"]}; }}
-            QPushButton:pressed, QPushButton:checked {{ background-color: {LIGHT_COLORS["WARNING_DARK"]}; }}
+            QPushButton:hover {{ background-color: {LIGHT_COLORS["WARNING_LIGHT"] if "WARNING_LIGHT" in LIGHT_COLORS else LIGHT_COLORS["WARNING"]}; }}
+            QPushButton:pressed, QPushButton:checked {{ background-color: {LIGHT_COLORS["WARNING_DARK"] if "WARNING_DARK" in LIGHT_COLORS else LIGHT_COLORS["WARNING"]}; }}
             QPushButton:disabled {{ background-color: {LIGHT_COLORS["DISABLED"]}; color: {LIGHT_COLORS["TEXT_DISABLED"]}; }}
         """)
-        self._toolbar_layout.addWidget(self._roi_button)
-        
-        self._toolbar_layout.addStretch()
-        
-        # FPS标签
-        self._fps_label = QLabel("FPS: 0.0")
-        self._fps_label.setStyleSheet("background-color: rgba(0, 0, 0, 0.5); color: lightgreen; font-size: 14px; padding: 2px 5px; border-radius: 3px;")
-        self._toolbar_layout.addWidget(self._fps_label)
-        
-        self._preview_layout.addWidget(self._toolbar)
-        
-        # 图像查看器容器
-        self._viewer_container = QWidget()
-        self._viewer_container_layout = QVBoxLayout(self._viewer_container)
-        self._viewer_container_layout.setContentsMargins(0, 0, 0, 0)
-        self._viewer_container_layout.setSpacing(0)
-        
-        # 图像查看器
+        toolbar_layout.addWidget(self._roi_button)
+
+        toolbar_layout.addStretch()
+        preview_layout.addWidget(toolbar)
+
+        # 图像查看器容器 (为了FPS标签覆盖)
+        self._viewer_container = QWidget() # Made a member for resizeEvent
+        viewer_container_layout = QVBoxLayout(self._viewer_container)
+        viewer_container_layout.setContentsMargins(0,0,0,0)
+        viewer_container_layout.setSpacing(0)
+
         self._image_viewer = ImageViewerWidget()
         self._image_viewer.setMinimumSize(640, 480)
-        self._image_viewer.set_interaction_mode(InteractionMode.VIEW)
-        self._viewer_container_layout.addWidget(self._image_viewer)
+        viewer_container_layout.addWidget(self._image_viewer)
         
-        self._preview_layout.addWidget(self._viewer_container, 1)
+        self._fps_label = QLabel("FPS: 0.0", self._viewer_container)
+        self._fps_label.setStyleSheet("background-color: rgba(0, 0, 0, 0.5); color: lightgreen; font-size: 14px; padding: 2px 5px; border-radius: 3px;")
+        self._fps_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        self._fps_label.setFixedSize(100, 25)
         
+        preview_layout.addWidget(self._viewer_container, 1)
+        self._viewer_container.resizeEvent = self._on_viewer_container_resize
+
         # --- 右侧: 控制面板 ---
-        self._control_panel = QWidget()
-        self._control_panel.setMinimumWidth(300)
-        self._control_panel.setMaximumWidth(400)
-        self._control_panel_layout = QVBoxLayout(self._control_panel)
-        self._control_panel_layout.setContentsMargins(0, 0, 0, 0)
-        self._control_panel_layout.setSpacing(SPACING["MEDIUM"])
-        
-        # 相机选择面板
-        self._camera_selection_panel = CollapsiblePanel("相机选择", collapsed=False)
-        self._camera_selection_layout = QVBoxLayout()
-        self._camera_selection_layout.setContentsMargins(SPACING["SMALL"], SPACING["SMALL"],
-                                                        SPACING["SMALL"], SPACING["SMALL"])
-        self._camera_selection_layout.setSpacing(SPACING["SMALL"])
-        
-        # 相机选择组合框
+        control_widget = QWidget()
+        self._control_layout = QVBoxLayout(control_widget)
+        self._control_layout.setContentsMargins(SPACING["SMALL"], 0, 0, 0)
+        self._control_layout.setSpacing(SPACING["MEDIUM"])
+
+        # 1. 相机连接与选择面板
+        camera_list_panel = CollapsiblePanel("相机连接与选择", self)
+        camera_list_content = QWidget()
+        camera_list_layout = QVBoxLayout(camera_list_content)
+        camera_list_layout.addWidget(QLabel("选择设备:"))
         self._camera_combo = QComboBox()
-        self._camera_combo.setStyleSheet(f"""
-            QComboBox {{ border: 1px solid {LIGHT_COLORS["BORDER"]}; border-radius: 4px; padding: {SPACING["SMALL"]}px; }}
-            QComboBox:hover {{ border-color: {LIGHT_COLORS["PRIMARY"]}; }}
-            QComboBox:disabled {{ background-color: {LIGHT_COLORS["DISABLED"]}; color: {LIGHT_COLORS["TEXT_DISABLED"]}; }}
-        """)
-        self._camera_selection_layout.addWidget(self._camera_combo)
-        
-        # 刷新相机列表按钮
-        self._refresh_button = QPushButton("刷新相机列表")
+        camera_list_layout.addWidget(self._camera_combo)
+        self._simulation_check = QCheckBox("使用模拟模式")
+        camera_list_layout.addWidget(self._simulation_check)
+        self._refresh_button = QPushButton("刷新列表")
         self._refresh_button.setStyleSheet(f"""
-            QPushButton {{ background-color: {LIGHT_COLORS["SECONDARY"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px; }}
-            QPushButton:hover {{ background-color: {LIGHT_COLORS["SECONDARY_LIGHT"]}; }}
-            QPushButton:pressed {{ background-color: {LIGHT_COLORS["SECONDARY_DARK"]}; }}
-            QPushButton:disabled {{ background-color: {LIGHT_COLORS["DISABLED"]}; color: {LIGHT_COLORS["TEXT_DISABLED"]}; }}
+             QPushButton {{ background-color: {LIGHT_COLORS["SECONDARY"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
+             QPushButton:hover {{ background-color: {LIGHT_COLORS["SECONDARY_LIGHT"] if "SECONDARY_LIGHT" in LIGHT_COLORS else LIGHT_COLORS["SECONDARY"]}; }}
+             QPushButton:pressed {{ background-color: {LIGHT_COLORS["SECONDARY_DARK"] if "SECONDARY_DARK" in LIGHT_COLORS else LIGHT_COLORS["SECONDARY"]}; }}
         """)
-        self._camera_selection_layout.addWidget(self._refresh_button)
-        
-        # 模拟模式复选框
-        self._simulation_check = QCheckBox("模拟模式")
-        self._camera_selection_layout.addWidget(self._simulation_check)
-        
-        self._camera_selection_panel.add_layout(self._camera_selection_layout)
-        self._control_panel_layout.addWidget(self._camera_selection_panel)
-        
-        # 相机参数面板
-        self._camera_params_panel = CollapsiblePanel("相机参数", collapsed=False)
-        self._camera_params_layout = QFormLayout()
-        self._camera_params_layout.setContentsMargins(SPACING["SMALL"], SPACING["SMALL"],
-                                                     SPACING["SMALL"], SPACING["SMALL"])
-        self._camera_params_layout.setSpacing(SPACING["SMALL"])
-        
-        # 曝光设置
-        exposure_layout = QHBoxLayout()
-        self._exposure_label = QLabel("曝光时间 (μs):")
-        self._exposure_spinbox = QDoubleSpinBox()
-        self._exposure_spinbox.setRange(1, 1000000)
-        self._exposure_spinbox.setDecimals(1)
-        self._exposure_spinbox.setSingleStep(100)
-        self._exposure_spinbox.setEnabled(False)
-        self._exposure_spinbox.setStyleSheet(f"""
-            QDoubleSpinBox {{ border: 1px solid {LIGHT_COLORS["BORDER"]}; border-radius: 4px; padding: {SPACING["SMALL"]}px; }}
-            QDoubleSpinBox:hover {{ border-color: {LIGHT_COLORS["PRIMARY"]}; }}
-            QDoubleSpinBox:disabled {{ background-color: {LIGHT_COLORS["DISABLED"]}; color: {LIGHT_COLORS["TEXT_DISABLED"]}; }}
-        """)
-        self._exposure_value_label = QLabel("0.0") # 显示曝光值
-        self._auto_exposure_check = QCheckBox("自动") # 自动曝光
-        self._auto_exposure_check.setEnabled(False)
-        exposure_layout.addWidget(self._exposure_spinbox)
-        exposure_layout.addWidget(self._exposure_value_label)
-        exposure_layout.addWidget(self._auto_exposure_check)
-        self._camera_params_layout.addRow(self._exposure_label, exposure_layout)
+        camera_list_layout.addWidget(self._refresh_button)
+        camera_list_panel.add_widget(camera_list_content)
+        self._control_layout.addWidget(camera_list_panel)
 
-        # 增益设置
-        gain_layout = QHBoxLayout()
-        self._gain_label = QLabel("增益:")
-        self._gain_spinbox = QDoubleSpinBox()
-        self._gain_spinbox.setRange(0, 100)
-        self._gain_spinbox.setDecimals(1)
-        self._gain_spinbox.setSingleStep(0.5)
-        self._gain_spinbox.setEnabled(False)
-        self._gain_spinbox.setStyleSheet(f"""
-            QDoubleSpinBox {{ border: 1px solid {LIGHT_COLORS["BORDER"]}; border-radius: 4px; padding: {SPACING["SMALL"]}px; }}
-            QDoubleSpinBox:hover {{ border-color: {LIGHT_COLORS["PRIMARY"]}; }}
-            QDoubleSpinBox:disabled {{ background-color: {LIGHT_COLORS["DISABLED"]}; color: {LIGHT_COLORS["TEXT_DISABLED"]}; }}
-        """)
-        self._gain_value_label = QLabel("0.0") # 显示增益值
-        self._auto_gain_check = QCheckBox("自动") # 自动增益
-        self._auto_gain_check.setEnabled(False)
-        gain_layout.addWidget(self._gain_spinbox)
-        gain_layout.addWidget(self._gain_value_label)
-        gain_layout.addWidget(self._auto_gain_check)
-        self._camera_params_layout.addRow(self._gain_label, gain_layout)
+        # 2. 相机参数面板
+        camera_params_panel = CollapsiblePanel("相机参数", self)
+        camera_params_content = QWidget()
+        camera_params_q_grid_layout = QGridLayout(camera_params_content)
 
-        # 白平衡设置
-        wb_layout = QHBoxLayout()
-        self._wb_label = QLabel("白平衡:")
+        camera_params_q_grid_layout.addWidget(QLabel("曝光时间 (μs):"), 0, 0)
+        self._exposure_slider = QSlider(Qt.Horizontal)
+        self._exposure_slider.setRange(10, 100000)
+        camera_params_q_grid_layout.addWidget(self._exposure_slider, 0, 1)
+        self._exposure_value_label = QLabel("10000 μs")
+        camera_params_q_grid_layout.addWidget(self._exposure_value_label, 0, 2)
+        self._auto_exposure_check = QCheckBox("自动")
+        camera_params_q_grid_layout.addWidget(self._auto_exposure_check, 0, 3)
+
+        camera_params_q_grid_layout.addWidget(QLabel("增益 (dB):"), 1, 0)
+        self._gain_slider = QSlider(Qt.Horizontal)
+        self._gain_slider.setRange(0, 20)
+        camera_params_q_grid_layout.addWidget(self._gain_slider, 1, 1)
+        self._gain_value_label = QLabel("0 dB")
+        camera_params_q_grid_layout.addWidget(self._gain_value_label, 1, 2)
+        self._auto_gain_check = QCheckBox("自动")
+        camera_params_q_grid_layout.addWidget(self._auto_gain_check, 1, 3)
+
+        camera_params_q_grid_layout.addWidget(QLabel("白平衡 (K):"), 2, 0)
         self._wb_slider = QSlider(Qt.Horizontal)
-        self._wb_slider.setRange(0, 100) # 假设范围0-100，需要根据实际相机调整
-        self._wb_slider.setEnabled(False)
-        self._wb_value_label = QLabel("50") # 显示白平衡值
-        self._auto_wb_check = QCheckBox("自动") # 自动白平衡
-        self._auto_wb_check.setEnabled(False)
-        wb_layout.addWidget(self._wb_slider)
-        wb_layout.addWidget(self._wb_value_label)
-        wb_layout.addWidget(self._auto_wb_check)
-        self._camera_params_layout.addRow(self._wb_label, wb_layout)
+        self._wb_slider.setRange(2000, 8000)
+        camera_params_q_grid_layout.addWidget(self._wb_slider, 2, 1)
+        self._wb_value_label = QLabel("5000 K")
+        camera_params_q_grid_layout.addWidget(self._wb_value_label, 2, 2)
+        self._auto_wb_check = QCheckBox("自动")
+        camera_params_q_grid_layout.addWidget(self._auto_wb_check, 2, 3)
         
-        # 触发模式设置
-        self._trigger_label = QLabel("触发模式:")
-        self._trigger_mode_checkbox = QCheckBox("启用")
-        self._trigger_mode_checkbox.setEnabled(False)
-        self._camera_params_layout.addRow(self._trigger_label, self._trigger_mode_checkbox)
-        
-        self._camera_params_panel.add_layout(self._camera_params_layout)
-        self._control_panel_layout.addWidget(self._camera_params_panel)
-        
-        # ROI信息面板
-        self._roi_info_panel = CollapsiblePanel("ROI信息", collapsed=True)
-        self._roi_info_layout = QFormLayout()
-        self._roi_info_layout.setContentsMargins(SPACING["SMALL"], SPACING["SMALL"],
-                                                SPACING["SMALL"], SPACING["SMALL"])
-        self._roi_info_layout.setSpacing(SPACING["SMALL"])
-        
-        # ROI位置和大小
-        self._roi_x_label = QLabel("X坐标:")
-        self._roi_x_spinbox = QSpinBox()
-        self._roi_x_spinbox.setRange(0, 10000)
-        self._roi_x_spinbox.setEnabled(False)
-        self._roi_info_layout.addRow(self._roi_x_label, self._roi_x_spinbox)
-        
-        self._roi_y_label = QLabel("Y坐标:")
-        self._roi_y_spinbox = QSpinBox()
-        self._roi_y_spinbox.setRange(0, 10000)
-        self._roi_y_spinbox.setEnabled(False)
-        self._roi_info_layout.addRow(self._roi_y_label, self._roi_y_spinbox)
-        
-        self._roi_width_label = QLabel("宽度:")
-        self._roi_width_spinbox = QSpinBox()
-        self._roi_width_spinbox.setRange(0, 10000)
-        self._roi_width_spinbox.setEnabled(False)
-        self._roi_info_layout.addRow(self._roi_width_label, self._roi_width_spinbox)
-        
-        self._roi_height_label = QLabel("高度:")
-        self._roi_height_spinbox = QSpinBox()
-        self._roi_height_spinbox.setRange(0, 10000)
-        self._roi_height_spinbox.setEnabled(False)
-        self._roi_info_layout.addRow(self._roi_height_label, self._roi_height_spinbox)
-        
-        # 设置ROI按钮
-        self._set_roi_button = QPushButton("设置ROI")
-        self._set_roi_button.setEnabled(False)
-        self._roi_info_layout.addRow("", self._set_roi_button)
-        
-        # 重置ROI按钮
-        self._reset_roi_button = QPushButton("重置ROI")
-        self._reset_roi_button.setEnabled(False)
-        self._roi_info_layout.addRow("", self._reset_roi_button)
-        
-        self._roi_info_panel.add_layout(self._roi_info_layout)
-        self._control_panel_layout.addWidget(self._roi_info_panel)
-        
-        # 设备信息面板
-        self._device_info_panel = CollapsiblePanel("设备信息", collapsed=False)
-        self._device_info_layout = QVBoxLayout()
-        self._device_info_layout.setContentsMargins(SPACING["SMALL"], SPACING["SMALL"],
-                                                   SPACING["SMALL"], SPACING["SMALL"])
-        self._device_info_layout.setSpacing(SPACING["SMALL"])
-        
-        # 设备信息标签
-        self._device_info_label = QLabel("未连接相机")
-        self._device_info_label.setWordWrap(True)
-        self._device_info_layout.addWidget(self._device_info_label)
-        
-        self._device_info_panel.add_layout(self._device_info_layout)
-        self._control_panel_layout.addWidget(self._device_info_panel)
-        
-        # 添加弹簧
-        self._control_panel_layout.addStretch()
-        
-        # 添加分割器部件
-        self._main_splitter.addWidget(self._preview_widget)
-        self._main_splitter.addWidget(self._control_panel)
-        
-        # 设置分割器初始大小比例 (左侧占70%)
-        self._main_splitter.setSizes([700, 300])
-        
-        # 将分割器添加到主布局
+        self._apply_params_button = QPushButton("应用参数")
+        camera_params_q_grid_layout.addWidget(self._apply_params_button, 3, 0, 1, 4)
+
+        camera_params_panel.add_widget(camera_params_content)
+        self._control_layout.addWidget(camera_params_panel)
+
+        # 3. 图像与触发面板
+        image_settings_panel = CollapsiblePanel("图像与触发", self)
+        image_settings_content = QWidget()
+        image_settings_q_grid_layout = QGridLayout(image_settings_content)
+
+        image_settings_q_grid_layout.addWidget(QLabel("分辨率:"), 0, 0)
+        self._resolution_combo = QComboBox()
+        self._resolution_combo.addItems(["(当前)", "1920x1080", "1280x720", "640x480"])
+        image_settings_q_grid_layout.addWidget(self._resolution_combo, 0, 1)
+
+        image_settings_q_grid_layout.addWidget(QLabel("帧率 (目标):"), 1, 0)
+        self._fps_spin = QSpinBox()
+        self._fps_spin.setRange(1, 200)
+        image_settings_q_grid_layout.addWidget(self._fps_spin, 1, 1)
+
+        image_settings_q_grid_layout.addWidget(QLabel("像素格式:"), 2, 0)
+        self._pixel_format_combo = QComboBox()
+        self._pixel_format_combo.addItems(["(当前)", "Mono8", "BayerRG8", "RGB8"])
+        image_settings_q_grid_layout.addWidget(self._pixel_format_combo, 2, 1)
+
+        image_settings_q_grid_layout.addWidget(QLabel("触发模式:"), 3, 0)
+        self._trigger_mode_combo = QComboBox()
+        self._trigger_mode_combo.addItems(["连续采集", "软触发", "硬触发"])
+        image_settings_q_grid_layout.addWidget(self._trigger_mode_combo, 3, 1)
+
+        image_settings_panel.add_widget(image_settings_content)
+        self._control_layout.addWidget(image_settings_panel)
+
+        # 4. 状态信息面板
+        status_panel = CollapsiblePanel("状态信息", self)
+        status_panel.set_expanded(True)
+        status_content = QWidget()
+        status_layout = QVBoxLayout(status_content)
+        self._status_label = QLabel("就绪")
+        self._status_label.setWordWrap(True)
+        status_layout.addWidget(self._status_label)
+        self._camera_info_label = QLabel("相机信息：未连接")
+        self._camera_info_label.setWordWrap(True)
+        status_layout.addWidget(self._camera_info_label)
+        status_panel.add_widget(status_content)
+        self._control_layout.addWidget(status_panel)
+
+        self._control_layout.addStretch()
+
+        self._main_splitter.addWidget(preview_widget)
+        self._main_splitter.addWidget(control_widget)
+        self._main_splitter.setSizes([700, 450])
+
         main_layout.addWidget(self._main_splitter)
+
+    def _on_viewer_container_resize(self, event: QSize): # Corrected type hint
+        if hasattr(self, '_fps_label') and self._fps_label:
+            margin = 5
+            parent_width = self._viewer_container.width() # Access parent through member
+            self._fps_label.move(parent_width - self._fps_label.width() - margin, margin)
+        QWidget.resizeEvent(self._viewer_container, event)
+
+
+    def _connect_ui_signals(self):
+        self._refresh_button.clicked.connect(self.refresh_devices_requested)
+        self._connect_button.clicked.connect(self.connect_button_clicked)
+        self._simulation_check.toggled.connect(self.simulation_mode_toggled)
+        self._camera_combo.currentIndexChanged.connect(self._on_camera_selection_changed)
+
+        self._stream_button.clicked.connect(self.stream_button_clicked)
+        self._trigger_button.clicked.connect(self.trigger_button_clicked)
+        self._roi_button.toggled.connect(self._on_roi_button_toggled_by_user)
+
+        self._exposure_slider.valueChanged.connect(lambda value: self._on_parameter_slider_changed("exposure_time", value, self._exposure_value_label, " μs"))
+        self._gain_slider.valueChanged.connect(lambda value: self._on_parameter_slider_changed("gain", value, self._gain_value_label, " dB"))
+        self._wb_slider.valueChanged.connect(lambda value: self._on_parameter_slider_changed("white_balance_kelvin", value, self._wb_value_label, " K"))
         
-        # 连接信号
-        self._connect_signals()
-    
-    def _connect_signals(self):
-        """连接UI信号到槽函数"""
-        # 按钮信号
-        self._connect_button.clicked.connect(self._on_connect_button_clicked)  # 连接按钮点击事件
-        self._stream_button.clicked.connect(self._on_stream_button_clicked)    # 开始/停止视频流按钮点击事件
-        self._capture_button.clicked.connect(self._on_capture_button_clicked)  # 拍照按钮点击事件
-        self._roi_button.clicked.connect(self._on_roi_button_clicked)          # ROI按钮点击事件
-        self._refresh_button.clicked.connect(self._on_refresh_button_clicked)  # 刷新相机列表按钮点击事件
-        self._set_roi_button.clicked.connect(self._on_set_roi_button_clicked)  # 设置ROI按钮点击事件
-        self._reset_roi_button.clicked.connect(self._on_reset_roi_button_clicked)   # 重置ROI按钮点击事件
+        self._auto_exposure_check.toggled.connect(lambda checked: self._on_auto_param_toggled("auto_exposure", checked, self._exposure_slider))
+        self._auto_gain_check.toggled.connect(lambda checked: self._on_auto_param_toggled("auto_gain", checked, self._gain_slider))
+        self._auto_wb_check.toggled.connect(lambda checked: self._on_auto_param_toggled("auto_wb", checked, self._wb_slider))
+
+        self._fps_spin.valueChanged.connect(lambda value: self.parameter_changed_by_user.emit("frame_rate", value))
+        self._trigger_mode_combo.currentIndexChanged.connect(lambda index: self.parameter_changed_by_user.emit("trigger_mode", index))
         
-        # 参数信号
-        self._exposure_spinbox.valueChanged.connect(self._on_exposure_changed)   # 曝光时间改变事件
-        self._gain_spinbox.valueChanged.connect(self._on_gain_changed)           # 增益改变事件
-        self._trigger_mode_checkbox.stateChanged.connect(self._on_trigger_mode_changed)   # 触发模式改变事件
-        
-        # 图像查看器信号
-        self._image_viewer.roi_selected.connect(self._on_roi_selected_by_viewer)   # ROI选择事件
-    
-    def update_device_info(self, info: Dict[str, Any]):
-        """
-        更新设备信息显示
-        
-        Args:
-            info: 设备信息
-        """
-        if not info:
-            self._device_info_label.setText("未连接相机")
-            return
-        
-        # 构建信息文本
-        info_text = ""
-        for key, value in info.items():
-            info_text += f"<b>{key}:</b> {value}<br>"  #
-        
-        self._device_info_label.setText(info_text)
-    
-    def show_error(self, error_msg: str):
-        """
-        显示错误信息
-        
-        Args:
-            error_msg: 错误信息
-        """
-        self.logger.error(f"相机错误: {error_msg}")
-        QMessageBox.critical(self, "相机错误", error_msg)
-    
-    def update_status(self, status: Dict[str, Any]):
-        """
-        更新相机状态
-        
-        Args:
-            status: 相机状态信息
-        """
-        # 更新连接状态
-        connected = status.get('connected', False)
-        self.update_connection_status(connected)
-        
-        # 更新流式传输状态
-        streaming = status.get('streaming', False)
-        self.update_streaming_status(streaming)
-        
-        # 更新设备ID
-        self._current_device_id = status.get('device_id', "")
-        
-        # 更新参数
-        parameters = status.get('parameters', {})
-        for param_name, value in parameters.items():
-            self.update_parameter(param_name, value)
-        
-        # 更新FPS
-        fps = status.get('fps', 0.0)
-        self.update_fps(fps)
-        
-        # 更新ROI
-        roi = status.get('roi', (0, 0, 0, 0))
-        self.update_parameter('roi', roi)
-        
-        # 更新设备信息
-        device_info = status.get('device_info', {})
-        self.update_device_info(device_info)
-        
-    # --- 事件处理方法 ---
-    def _on_connect_button_clicked(self):
-        """连接/断开相机按钮点击事件"""
-        if not self._is_connected:
-            # 获取当前选择的相机ID
-            if self._camera_combo.count() == 0:
-                QMessageBox.warning(self, "警告", "没有可用的相机设备")
-                return
-            
-            device_id = self._camera_combo.currentData()
-            if not device_id:
-                QMessageBox.warning(self, "警告", "请选择相机设备")
-                return
-            
-            # 发送连接信号
-            self.connect_camera_signal.emit(device_id)
+        self._resolution_combo.currentIndexChanged.connect(self._on_resolution_changed)
+        self._pixel_format_combo.currentIndexChanged.connect(self._on_pixel_format_changed)
+
+        self._apply_params_button.clicked.connect(self._on_apply_all_parameters)
+        self._image_viewer.get_viewer().roi_selected.connect(self._on_roi_selected_from_viewer_widget)
+
+    def _on_camera_selection_changed(self, index: int):
+        if index >= 0: # Ensure a valid index
+            device_id = self._camera_combo.itemData(index) # itemData can be None for "自动选择"
+            if device_id is not None: # Only emit if a specific device is selected
+                self.device_selection_changed.emit(device_id)
+            elif self._camera_combo.currentText() == "自动选择": # Handle "自动选择" explicitly if needed
+                self.device_selection_changed.emit("") # Or a special value like "auto"
+
+    def _on_roi_button_toggled_by_user(self, checked: bool):
+        if checked:
+            self._image_viewer.get_viewer().set_interaction_mode(InteractionMode.SELECT_ROI)
+            self.show_status_message("ROI选择模式：在图像上拖动以选择区域。")
         else:
-            # 发送断开连接信号
-            self.disconnect_camera_signal.emit()
-    
-    def _on_stream_button_clicked(self):
-        """开始/停止视频流按钮点击事件"""
-        if not self._is_streaming:
-            # 发送开始流式传输信号
-            self.start_streaming_signal.emit()
-        else:
-            # 发送停止流式传输信号
-            self.stop_streaming_signal.emit()
-    
-    def _on_capture_button_clicked(self):
-        """拍照按钮点击事件"""
-        self.trigger_once_signal.emit()
-    
-    def _on_roi_button_clicked(self):
-        """ROI选择按钮点击事件"""
+            self._image_viewer.get_viewer().set_interaction_mode(InteractionMode.VIEW)
+        self.roi_button_toggled.emit(checked)
+
+    def _on_roi_selected_from_viewer_widget(self, rect: QRectF):
+        self.logger.info(f"ROI selected from viewer: {rect.x()},{rect.y()},{rect.width()},{rect.height()}")
         if self._roi_button.isChecked():
-            # 启用ROI选择模式
-            self._image_viewer.set_interaction_mode(InteractionMode.SELECT_ROI)
-            self.logger.info("开始ROI选择模式")
-        else:
-            # 禁用ROI选择模式
-            self._image_viewer.set_interaction_mode(InteractionMode.VIEW)
-            self.logger.info("取消ROI选择模式")
-    
-    def _on_refresh_button_clicked(self):
-        """刷新相机列表按钮点击事件"""
-        self.event_signal.emit("refresh_camera_list", {})
-    
-    def _on_set_roi_button_clicked(self):
-        """设置ROI按钮点击事件"""
-        x = self._roi_x_spinbox.value()
-        y = self._roi_y_spinbox.value()
-        width = self._roi_width_spinbox.value()
-        height = self._roi_height_spinbox.value()
-        
-        # 发送设置ROI信号
-        self.set_roi_signal.emit(x, y, width, height)
-    
-    def _on_reset_roi_button_clicked(self):
-        """重置ROI按钮点击事件"""
-        self.reset_roi_signal.emit()
-    
-    def _on_exposure_changed(self, value):
-        """曝光值变更事件"""
-        if self._is_connected:
-            self.set_parameter_signal.emit("exposure", value)
-    
-    def _on_gain_changed(self, value):
-        """处理增益值变化"""
-        self.set_parameter_signal.emit("gain", value)
-        self._update_gain_label(value) # 更新增益标签
+            self._roi_button.setChecked(False) 
+        self.show_status_message(f"选择ROI: x={int(rect.x())}, y={int(rect.y())}, w={int(rect.width())}, h={int(rect.height())} (应用ROI需相机支持)")
+        # Notify controller about the new ROI from viewer
+        self.parameter_changed_by_user.emit("roi_from_viewer", 
+                                            (int(rect.x()), int(rect.y()), 
+                                             int(rect.width()), int(rect.height())))
 
-    def _on_trigger_mode_changed(self, state):
-        """触发模式变更事件"""
-        if self._is_connected:
-            self.set_parameter_signal.emit("trigger_mode", state == Qt.Checked)
 
-    def _on_wb_changed(self, value):
-        """处理白平衡值变化"""
-        self.set_parameter_signal.emit("white_balance", value)
-        self._update_wb_label(value)
+    def _on_parameter_slider_changed(self, param_name: str, value: int, label_widget: QLabel, unit: str):
+        label_widget.setText(f"{value}{unit}")
+        self.parameter_changed_by_user.emit(param_name, value)
 
-    def _on_auto_exposure_changed(self, state):
-        """处理自动曝光模式变化"""
-        enabled = state == Qt.Checked
-        self._exposure_spinbox.setEnabled(not enabled and self._is_connected)
-        self.set_parameter_signal.emit("auto_exposure", enabled)
+    def _on_auto_param_toggled(self, param_name: str, checked: bool, slider_widget: QSlider):
+        # slider_widget.setEnabled(not checked) # This will be handled by update_ui_enable_states
+        self.parameter_changed_by_user.emit(param_name, checked)
+        # self.show_status_message(f"{param_name}: {'启用' if checked else '禁用'} (需应用参数)") # Status comes from model/controller
 
-    def _on_auto_gain_changed(self, state):
-        """处理自动增益模式变化"""
-        enabled = state == Qt.Checked
-        self._gain_spinbox.setEnabled(not enabled and self._is_connected)
-        self.set_parameter_signal.emit("auto_gain", enabled)
+    def _on_resolution_changed(self, index: int):
+        if index > 0:
+            resolution_str = self._resolution_combo.currentText()
+            self.parameter_changed_by_user.emit("resolution", resolution_str)
 
-    def _on_auto_wb_changed(self, state):
-        """处理自动白平衡模式变化"""
-        enabled = state == Qt.Checked
-        self._wb_slider.setEnabled(not enabled and self._is_connected)
-        self.set_parameter_signal.emit("auto_wb", enabled)
+    def _on_pixel_format_changed(self, index: int):
+        if index > 0:
+            pixel_format_str = self._pixel_format_combo.currentText()
+            self.parameter_changed_by_user.emit("pixel_format", pixel_format_str)
 
-    def _on_simulation_mode_changed(self, state):
-        """处理模拟模式变化"""
-        self.simulation_mode_changed.emit(state == Qt.Checked)
+    def _on_apply_all_parameters(self):
+        params = self.get_all_ui_parameters()
+        self.apply_all_parameters_requested.emit(params)
 
-    def _on_roi_selected_by_viewer(self, rect: QRectF):
-        """图像查看器ROI选择事件"""
-        # 从QRectF中提取坐标和尺寸
-        x = rect.x()
-        y = rect.y()
-        width = rect.width()
-        height = rect.height()
+    def update_connection_status(self, is_connected: bool, device_id: str):
+        self.logger.info(f"View: Updating connection status to {is_connected} for device '{device_id}'")
+        self._connect_button.setText("断开相机" if is_connected else "连接相机")
         
-        self.logger.info(f"ROI选择: x={x}, y={y}, width={width}, height={height}")
-        
-        # 更新ROI信息面板
-        self._roi_x_spinbox.setValue(int(x))
-        self._roi_y_spinbox.setValue(int(y))
-        self._roi_width_spinbox.setValue(int(width))
-        self._roi_height_spinbox.setValue(int(height))
-        
-        # 取消ROI选择模式
-        self._roi_button.setChecked(False)
-        self._image_viewer.set_interaction_mode(InteractionMode.VIEW)
-    
-    def _update_ui_timer(self):
-        """UI更新定时器事件"""
-        # 如果有新帧可用，刷新图像
-        if self._current_frame is not None:
-            current_time = time.time()
-            elapsed = current_time - self._last_update_time
-            
-            # 限制刷新率，最多每30ms刷新一次 (约33fps)
-            if elapsed >= 0.03:
-                self._update_image_display()
-                self._last_update_time = current_time
-    
-    def _update_image_display(self):
-        """更新图像显示"""
-        if self._current_frame is not None:
-            self._image_viewer.setImage(self._current_frame)
-    
-    # --- 公共方法 ---
-    def update_connection_status(self, connected: bool):
-        """
-        更新连接状态
-        
-        Args:
-            connected: 是否已连接
-        """
-        self._is_connected = connected
-        
-        # 更新UI状态
-        self._camera_combo.setEnabled(not connected)
-        self._refresh_button.setEnabled(not connected)
-        self._connect_button.setText("断开相机" if connected else "连接相机")
-        self._stream_button.setEnabled(connected)
-        self._capture_button.setEnabled(connected)
-        self._exposure_spinbox.setEnabled(connected)
-        self._gain_spinbox.setEnabled(connected)
-        self._trigger_mode_checkbox.setEnabled(connected)
-        self._roi_button.setEnabled(connected)
-        self._exposure_spinbox.setEnabled(self._is_connected and not self._auto_exposure_check.isChecked())
-        self._gain_spinbox.setEnabled(self._is_connected and not self._auto_gain_check.isChecked())
-        self._trigger_mode_checkbox.setEnabled(self._is_connected)
-        self._wb_slider.setEnabled(self._is_connected and not self._auto_wb_check.isChecked())
-        self._auto_exposure_check.setEnabled(self._is_connected)
-        self._auto_gain_check.setEnabled(self._is_connected)
-        self._auto_wb_check.setEnabled(self._is_connected)
-        
-        # ROI相关
-        self._roi_button.setEnabled(self._is_connected)
-        self._capture_button.setEnabled(True)
-        self._trigger_mode_checkbox.setEnabled(True)
-    
-    def update_streaming_status(self, streaming: bool):
-        """
-        更新流式传输状态
-        
-        Args:
-            streaming: 是否正在流式传输
-        """
-        self._is_streaming = streaming
-        
-        # 更新UI状态
-        if streaming:
-            self._stream_button.setText("停止视频流")
-            self._stream_button.setStyleSheet(f"""
+        current_streaming_status = self._stream_button.text() == "停止视频流" # Infer current stream state from button
+        self.update_ui_enable_states(is_connected=is_connected, is_streaming=current_streaming_status and is_connected)
+
+        if is_connected:
+            self._connect_button.setStyleSheet(f"""
                 QPushButton {{ background-color: {LIGHT_COLORS["DANGER"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
-                QPushButton:hover {{ background-color: {LIGHT_COLORS["DANGER_LIGHT"]}; }}
-                QPushButton:pressed {{ background-color: {LIGHT_COLORS["DANGER_DARK"]}; }}
+                QPushButton:hover {{ background-color: {LIGHT_COLORS["DANGER_LIGHT"] if "DANGER_LIGHT" in LIGHT_COLORS else LIGHT_COLORS["DANGER"]}; }}
+                QPushButton:pressed {{ background-color: {LIGHT_COLORS["DANGER_DARK"] if "DANGER_DARK" in LIGHT_COLORS else LIGHT_COLORS["DANGER"]}; }}
             """)
-            self._capture_button.setEnabled(False)
-            self._trigger_mode_checkbox.setEnabled(False)
         else:
-            self._stream_button.setText("开始视频流")
-            self._stream_button.setStyleSheet(f"""
-                QPushButton {{ background-color: {LIGHT_COLORS["SUCCESS"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
-                QPushButton:hover {{ background-color: {LIGHT_COLORS["SUCCESS_LIGHT"]}; }}
-                QPushButton:pressed {{ background-color: {LIGHT_COLORS["SUCCESS_DARK"]}; }}
+            self._connect_button.setStyleSheet(f"""
+                QPushButton {{ background-color: {LIGHT_COLORS["PRIMARY"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
+                QPushButton:hover {{ background-color: {LIGHT_COLORS["PRIMARY_LIGHT"]}; }}
+                QPushButton:pressed {{ background-color: {LIGHT_COLORS["PRIMARY_DARK"]}; }}
             """)
-            self._capture_button.setEnabled(True)
-            self._trigger_mode_checkbox.setEnabled(True)
-    
-    def update_frame(self, frame: np.ndarray):
-        """
-        更新图像帧
+            self._camera_info_label.setText("相机信息：未连接")
+            self.display_frame(None)
+
+    def update_streaming_status(self, is_streaming: bool):
+        self.logger.info(f"View: Updating streaming status to {is_streaming}")
+        self._stream_button.setText("停止视频流" if is_streaming else "开始视频流")
+        self._stream_button.setIcon(QIcon("./UI/resources/icons/Stop-Button.png" if is_streaming else "./UI/resources/icons/PlayButton.png"))
         
-        Args:
-            frame: 图像帧数据
-        """
-        if frame is not None:
-            self._current_frame = frame.copy()
-    
-    def update_parameter(self, param_name: str, value: Any):
-        """
-        更新参数显示
+        if is_streaming:
+             self._stream_button.setStyleSheet(f"""
+                QPushButton {{ background-color: {LIGHT_COLORS["DANGER"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
+                QPushButton:hover {{ background-color: {LIGHT_COLORS["DANGER_LIGHT"] if "DANGER_LIGHT" in LIGHT_COLORS else LIGHT_COLORS["DANGER"]}; }}
+                QPushButton:pressed {{ background-color: {LIGHT_COLORS["DANGER_DARK"] if "DANGER_DARK" in LIGHT_COLORS else LIGHT_COLORS["DANGER"]}; }}
+             """)
+        else:
+             self._stream_button.setStyleSheet(f"""
+                QPushButton {{ background-color: {LIGHT_COLORS["SUCCESS"]}; color: white; border: none; border-radius: 4px; padding: {SPACING["SMALL"]}px {SPACING["MEDIUM"]}px; }}
+                QPushButton:hover {{ background-color: {LIGHT_COLORS["SUCCESS_LIGHT"] if "SUCCESS_LIGHT" in LIGHT_COLORS else LIGHT_COLORS["SUCCESS"]}; }}
+                QPushButton:pressed {{ background-color: {LIGHT_COLORS["SUCCESS_DARK"] if "SUCCESS_DARK" in LIGHT_COLORS else LIGHT_COLORS["SUCCESS"]}; }}
+             """)
         
-        Args:
-            param_name: 参数名称
-            value: 参数值
-        """
-        if param_name == "exposure":
-            self._exposure_spinbox.blockSignals(True)
-            self._exposure_spinbox.setValue(float(value))
-            self._exposure_spinbox.blockSignals(False)
-        elif param_name == "gain":
-            self._gain_spinbox.blockSignals(True)
-            self._gain_spinbox.setValue(float(value))
-            self._gain_spinbox.blockSignals(False)
-        elif param_name == "trigger_mode":
-            self._trigger_mode_checkbox.blockSignals(True)
-            self._trigger_mode_checkbox.setChecked(bool(value))
-            self._trigger_mode_checkbox.blockSignals(False)
-        elif param_name == "roi":
-            x, y, width, height = value
-            self._roi_x_spinbox.blockSignals(True)
-            self._roi_y_spinbox.blockSignals(True)
-            self._roi_width_spinbox.blockSignals(True)
-            self._roi_height_spinbox.blockSignals(True)
-            
-            self._roi_x_spinbox.setValue(int(x))
-            self._roi_y_spinbox.setValue(int(y))
-            self._roi_width_spinbox.setValue(int(width))
-            self._roi_height_spinbox.setValue(int(height))
-            
-            self._roi_x_spinbox.blockSignals(False)
-            self._roi_y_spinbox.blockSignals(False)
-            self._roi_width_spinbox.blockSignals(False)
-            self._roi_height_spinbox.blockSignals(False)
-    
-    def update_camera_list(self, devices: List[Dict[str, Any]]):
-        """
-        更新相机设备列表
-        
-        Args:
-            devices: 相机设备列表
-        """
-        self._available_devices = devices
-        
-        # 清空列表
+        current_connected_status = self._connect_button.text() == "断开相机"
+        self.update_ui_enable_states(is_connected=current_connected_status, is_streaming=is_streaming)
+
+    def update_available_devices(self, devices: List[Dict[str, Any]], current_selection_id: Optional[str] = None):
+        self.logger.info(f"View: Updating available devices. Found: {len(devices)}. Current selection hint: {current_selection_id}")
+        self._camera_combo.blockSignals(True)
         self._camera_combo.clear()
+        self._camera_combo.addItem("自动选择", None) 
         
-        # 添加设备
-        for device in devices:
-            device_id = device.get("id", "")
-            device_name = device.get("name", "未知设备")
-            display_text = f"{device_name} ({device_id})"
-            self._camera_combo.addItem(display_text, device_id)
-    
-    def update_fps(self, fps: float):
-        """
-        更新FPS显示
+        selected_idx_to_set = 0 
+        for i, device_info in enumerate(devices):
+            dev_id = device_info.get('device_id', f'unknown_id_{i}')
+            model_name = device_info.get('model_name', '未知型号')
+            sn = device_info.get('serial_number', 'N/A')
+            ip = device_info.get('device_ip', '')
+            display_text = f"[{dev_id}] {model_name} (SN:{sn})"
+            if ip: display_text += f" - {ip}"
+            
+            self._camera_combo.addItem(display_text, userData=dev_id)
+            if dev_id == current_selection_id:
+                selected_idx_to_set = i + 1
         
-        Args:
-            fps: 当前FPS值
-        """
-        self._current_fps = fps
+        if current_selection_id is None and self._camera_combo.count() > 0: # No specific selection, default to "自动选择"
+            selected_idx_to_set = 0
+        
+        self._camera_combo.setCurrentIndex(selected_idx_to_set)
+        self._camera_combo.blockSignals(False)
+
+    def update_simulation_mode_checkbox(self, is_simulation: bool):
+        self._simulation_check.blockSignals(True)
+        self._simulation_check.setChecked(is_simulation)
+        self._simulation_check.blockSignals(False)
+
+    def display_frame(self, frame: Optional[np.ndarray]):
+        if frame is None:
+            self._image_viewer.set_image(None)
+            return
+        try:
+            h, w = frame.shape[:2]
+            stride = frame.strides[0]
+            fmt = QImage.Format_Grayscale8
+            if frame.ndim == 3:
+                if frame.shape[2] == 3: fmt = QImage.Format_BGR888
+                elif frame.shape[2] == 4: fmt = QImage.Format_ARGB32
+                else: self.logger.warning(f"Unsupported color frame: {frame.shape}"); return
+            elif frame.ndim != 2:
+                 self.logger.warning(f"Unsupported frame: {frame.shape}"); return
+            
+            qimg = QImage(frame.data, w, h, stride, fmt)
+            self._image_viewer.set_image(qimg.copy())
+        except Exception as e:
+            self.logger.error(f"Error displaying frame: {e}", exc_info=True)
+
+    def update_fps_display(self, fps: float):
         self._fps_label.setText(f"FPS: {fps:.1f}")
+
+    def update_parameters_display(self, params: Dict[str, Any]):
+        self.logger.debug(f"View: Updating parameters display with: {params}")
+
+        def set_val(widget, val, block=True):
+            if block: widget.blockSignals(True)
+            if isinstance(widget, QSlider): widget.setValue(int(val))
+            elif isinstance(widget, (QSpinBox, QDoubleSpinBox)): widget.setValue(val) # Handles int/float
+            elif isinstance(widget, QCheckBox): widget.setChecked(bool(val))
+            elif isinstance(widget, QComboBox):
+                idx = widget.findData(val) if val is not None else -1 # findData for value
+                if idx == -1 and val is not None: idx = widget.findText(str(val)) # fallback to text
+                if idx != -1: widget.setCurrentIndex(idx)
+                elif widget.count() > 0 and val is None : widget.setCurrentIndex(0) # Default to first if val is None (e.g. "Current")
+            if block: widget.blockSignals(False)
+
+        # Parameters from model
+        exp_time = params.get("exposure_time", self._exposure_slider.minimum())
+        set_val(self._exposure_slider, exp_time)
+        self._exposure_value_label.setText(f"{exp_time:.0f} μs")
+        set_val(self._auto_exposure_check, params.get("auto_exposure", False))
+
+        gain_val = params.get("gain", self._gain_slider.minimum())
+        set_val(self._gain_slider, gain_val)
+        self._gain_value_label.setText(f"{gain_val:.1f} dB")
+        set_val(self._auto_gain_check, params.get("auto_gain", False))
+
+        wb_k = params.get("white_balance_kelvin", self._wb_slider.minimum())
+        set_val(self._wb_slider, wb_k)
+        self._wb_value_label.setText(f"{wb_k:.0f} K")
+        set_val(self._auto_wb_check, params.get("auto_wb", False))
+
+        set_val(self._fps_spin, params.get("frame_rate", 30))
+        set_val(self._trigger_mode_combo, params.get("trigger_mode", 0)) # Index for combo
+        
+        # Update resolution and pixel format combos if values are present
+        res_val = params.get("resolution")
+        if res_val: set_val(self._resolution_combo, res_val)
+        else: self._resolution_combo.setCurrentIndex(0) # Default to "(当前)"
+
+        px_fmt_val = params.get("pixel_format")
+        if px_fmt_val: set_val(self._pixel_format_combo, px_fmt_val)
+        else: self._pixel_format_combo.setCurrentIndex(0) # Default to "(当前)"
+
+        # Update camera info label
+        info_parts = [f"相机ID: {params.get('device_id', 'N/A')}"]
+        if 'model_name' in params: info_parts.append(f"型号: {params['model_name']}")
+        if 'serial_number' in params: info_parts.append(f"SN: {params['serial_number']}")
+        if 'device_ip' in params: info_parts.append(f"IP: {params['device_ip']}")
+        info_parts.append(f"分辨率: {params.get('width', 'N/A')}x{params.get('height', 'N/A')}")
+        info_parts.append(f"像素格式: {params.get('pixel_format', 'N/A')}")
+        info_parts.append(f"帧率 (目标): {params.get('frame_rate', 'N/A')} FPS")
+        info_parts.append(f"曝光: {params.get('exposure_time', 'N/A'):.0f} μs ({'自动' if params.get('auto_exposure') else '手动'})")
+        info_parts.append(f"增益: {params.get('gain', 'N/A'):.1f} dB ({'自动' if params.get('auto_gain') else '手动'})")
+        info_parts.append(f"白平衡: {params.get('white_balance_kelvin', 'N/A'):.0f} K ({'自动' if params.get('auto_wb') else '手动'})")
+        self._camera_info_label.setText("\n".join(info_parts))
+        
+        # Update enable states based on new params (especially auto modes)
+        is_connected = self._connect_button.text() == "断开相机" # Infer from button
+        is_streaming = self._stream_button.text() == "停止视频流"
+        self.update_ui_enable_states(is_connected, is_streaming)
+
+
+    def show_status_message(self, message: str):
+        self.logger.info(f"View Status: {message}")
+        self._status_label.setText(message)
+
+    def show_error_message(self, title: str, message: str):
+        self.logger.error(f"View Error: {title} - {message}")
+        self._status_label.setText(f"错误: {message}")
+        QMessageBox.critical(self, title, message)
+
+    def get_current_selected_device_id(self) -> Optional[str]:
+        if self._camera_combo.currentIndex() >= 0:
+            return self._camera_combo.currentData()
+        return None
+
+    def get_all_ui_parameters(self) -> Dict[str, Any]:
+        params = {
+            "exposure_time": self._exposure_slider.value(),
+            "gain": self._gain_slider.value(),
+            "white_balance_kelvin": self._wb_slider.value(),
+            "auto_exposure": self._auto_exposure_check.isChecked(),
+            "auto_gain": self._auto_gain_check.isChecked(),
+            "auto_wb": self._auto_wb_check.isChecked(),
+            "frame_rate": self._fps_spin.value(),
+            "trigger_mode": self._trigger_mode_combo.currentIndex(),
+        }
+        if self._resolution_combo.currentIndex() > 0:
+            params["resolution"] = self._resolution_combo.currentText()
+        if self._pixel_format_combo.currentIndex() > 0:
+            params["pixel_format"] = self._pixel_format_combo.currentText()
+        return params
+
+    def update_ui_enable_states(self, is_connected: bool, is_streaming: bool):
+        self._camera_combo.setEnabled(not is_connected)
+        self._refresh_button.setEnabled(not is_connected)
+        self._simulation_check.setEnabled(not is_connected)
+
+        self._stream_button.setEnabled(is_connected)
+        
+        # Get current UI state for auto params to decide slider enable state
+        auto_exp = self._auto_exposure_check.isChecked()
+        auto_gain = self._auto_gain_check.isChecked()
+        auto_wb = self._auto_wb_check.isChecked()
+
+        params_adjustable = is_connected and not is_streaming
+        
+        self._trigger_button.setEnabled(is_connected and (not is_streaming or self._trigger_mode_combo.currentIndex() != 0))
+        self._trigger_mode_combo.setEnabled(is_connected) # Can change trigger mode if connected, even if streaming (model handles logic)
+
+
+        self._roi_button.setEnabled(is_connected and self._image_viewer.get_viewer().pixmap() is not None)
+        if not self._roi_button.isEnabled() and self._roi_button.isChecked():
+            self._roi_button.setChecked(False) # This will trigger its toggled signal
+            # self._image_viewer.get_viewer().set_interaction_mode(InteractionMode.VIEW) # Handled by _on_roi_button_toggled
+
+        self._apply_params_button.setEnabled(params_adjustable)
+        self._fps_spin.setEnabled(params_adjustable)
+        self._resolution_combo.setEnabled(params_adjustable)
+        self._pixel_format_combo.setEnabled(params_adjustable)
+
+        self._auto_exposure_check.setEnabled(params_adjustable)
+        self._auto_gain_check.setEnabled(params_adjustable)
+        self._auto_wb_check.setEnabled(params_adjustable)
+
+        self._exposure_slider.setEnabled(params_adjustable and not auto_exp)
+        self._gain_slider.setEnabled(params_adjustable and not auto_gain)
+        self._wb_slider.setEnabled(params_adjustable and not auto_wb)
+
+    def closeEvent(self, event):
+        self.logger.info("CameraView closing.")
+        # Any view-specific cleanup if needed
+        super().closeEvent(event)

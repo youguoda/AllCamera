@@ -28,21 +28,21 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QMessageBox)
 
 
-# Add project root if necessary (adjust path as needed)
+# 如有必要，添加项目根目录（根据需要调整路径）
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')) # Example: Adjust '..' count
 if project_root not in sys.path:
     sys.path.append(project_root)
     print(f"Appended to sys.path: {project_root}")
 
 try:
-    # UI Utilities and Widgets (from the first code block's context)
+    # 用户界面实用工具和部件
     from UI.utils.ui_constants import LIGHT_COLORS, SPACING
     from UI.widgets.enhanced_image_viewer import ImageViewerWidget, InteractionMode
     from UI.widgets.collapsible_panel import CollapsiblePanel
 
-    # Core Components (from the second code block's context)
+    # 核心组件
     from core.camera.camera_factory import CameraFactoryManager
-    # Ensure the specific factory is imported if needed for registration, though CameraFactoryManager handles it
+    # 确保在注册需要时导入特定的工厂
     from core.camera.hikvision_camera_factory import HikvisionCameraFactory
     from core.utils.signal_manager import signal_manager
     from core.utils.logger import get_logger
@@ -64,7 +64,6 @@ class CameraTabWidget(QMainWindow):
 
     """
 
-    # Signal from original UI definition (might be useful)
     camera_status_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None):
@@ -72,43 +71,42 @@ class CameraTabWidget(QMainWindow):
         super().__init__(parent)
 
         # --- 状态变量（来自相机逻辑） ---
-        self.camera = None
-        self.is_running = False # Corresponds to _streaming_active
-        self.current_frame = None
-        self.camera_id = "未知" # Will be updated on connect
-        self.available_devices = []
-        self.use_simulation = False # Default to not using simulation
-        self._camera_connected = False # 对应相机。is_open（）
+        self.camera = None           # 相机对象
+        self.is_running = False      # 是否正在运行
+        self.current_frame = None    # 当前帧
+        self.camera_id = "未知"      # 相机 ID，将在连接时更新
+        self.available_devices = []  # 可用的相机设备列表
+        self.use_simulation = False  # 默认不使用模拟
+        self._camera_connected = False   # 对应相机是否连接
 
-        # Threading and FPS
-        self.frame_lock = threading.Lock()
-        self.new_frame_available = False
-        self.fps_count = 0
-        self.last_fps_time = time.time()
-        self.display_fps = 0.0
+        # 线程与帧率
+        self.frame_lock = threading.Lock()       # 用于多线程处理图像帧的锁
+        self.new_frame_available = False        # 新帧是否可用标志
+        self.fps_count = 0                     # 帧率计数器
+        self.last_fps_time = time.time()       # 上次计算帧率的时间
+        self.display_fps = 0.0                  # 显示帧率
 
-        # Set window title and default size
+        # 设置窗口标题和默认大小
         self.setWindowTitle("相机控制")
         self.resize(1200, 800) # Default size
 
-        # --- Initialize UI using the structure from UI.py ---
-        self._init_ui() # Call the UI setup method
+        # --- 构建用户界面 ---
+        self._init_ui() # 调用用户界面设置方法
 
-        # --- Connect Signals (UI elements to Control Logic) ---
-        self._connect_signals_to_logic() # Connect UI widgets to control methods
-
-        # --- Connect Camera Core Signals ---
+        # --- 连接信号（将用户界面元素与控制逻辑相连） ---
+        self._connect_signals_to_logic() # 将用户界面小部件连接到控制方法
+        # --- 连接相机核心信号 ---
         self._connect_core_signals()
 
-        # --- Initialize Camera Logic ---
+        # --- 初始化相机逻辑 ---
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self._update_display_and_fps) # Update image display + FPS calc
-        self.timer.start(30)  # ~30 FPS display update rate
+        self.timer.timeout.connect(self._update_display_and_fps) # 更新图像显示和计算 FPS
+        self.timer.start(30)  # 约30帧/秒的显示刷新率
 
         # 稍微推迟相机的初始化，以便让用户界面能够显示出来(100 毫秒之后，initialize_camera_core 方法会被自动调用)
         QTimer.singleShot(100, self.initialize_camera_core)
 
-        # Update initial UI state
+        # 更新用户界面状态
         self._update_ui_state()
 
     def _init_ui(self):
@@ -440,7 +438,7 @@ class CameraTabWidget(QMainWindow):
              logger.error(f"Error connecting core signals: {e}", exc_info=True)
 
 
-    # --- UI Update and State Management ---
+    # --- 用户界面更新与状态管理 ---
 
     def _update_ui_state(self):
         """根据相机状态更新用户界面元素的启用/禁用状态和文本。"""
@@ -477,7 +475,7 @@ class CameraTabWidget(QMainWindow):
 
         # 仅当已连接、正在流式传输且处于触发模式时，捕获（触发）按钮才启用
         trigger_mode_index = self._trigger_combo.currentIndex()
-        can_trigger = connected and streaming and trigger_mode_index > 0 # Only for Soft/Hard trigger
+        can_trigger = connected and streaming and trigger_mode_index > 0 # 仅用于软/硬触发
         self._capture_button.setEnabled(can_trigger)
 
 
@@ -581,7 +579,7 @@ class CameraTabWidget(QMainWindow):
                  self.log_status("错误：未找到相机驱动或工厂。")
                  return False
 
-            # Prefer 'hikvision' if available, otherwise take the first one
+            #如果有“hikvision”，则优先选择它，否则选择第一个。
             cam_type = "hikvision" if "hikvision" in available_types else available_types[0]
             logger.info(f"Attempting to create camera of type: {cam_type}")
 
@@ -591,11 +589,11 @@ class CameraTabWidget(QMainWindow):
                 self.log_status(f"错误：创建相机实例失败 ({cam_type})")
                 return False
 
-            # Set initial simulation state
+            # 设置初始模拟状态
             self.camera._is_simulation = self.use_simulation
 
             self.log_status("相机核心初始化成功。请刷新设备列表或连接相机。")
-            self.refresh_devices() # Attempt to list devices immediately
+            self.refresh_devices() # 尝试立即列出设备
             return True
         except Exception as e:
             self.show_error(f"初始化相机核心失败: {e}")
@@ -1104,63 +1102,62 @@ class CameraTabWidget(QMainWindow):
 
 
     def handle_frame(self, frame, camera_id):
-        """Receives a frame from the camera core via signal."""
+        """通过信号从相机核心接收一帧图像."""
         if frame is not None:
             with self.frame_lock:
-                # Make a copy to decouple from the camera callback thread
+                # 进行复制，以便与相机回调线程解耦
                 self.current_frame = frame.copy()
-                self.camera_id = camera_id # Update camera ID if needed
+                self.camera_id = camera_id 
                 self.new_frame_available = True
-                # Increment FPS counter here (safer than in display thread)
+                # 在此处增加帧率计数器
                 self.fps_count += 1
 
 
     def _update_display_and_fps(self):
-        """Updates the image viewer and calculates FPS."""
+        """定时器触发的函数，用于在 UI 线程中安全地更新图像显示并计算 FPS。"""
         frame_to_display = None
         with self.frame_lock:
             if self.new_frame_available and self.current_frame is not None:
-                # Get the latest frame and mark as processed
+                # 获取最新帧并标记为已处理
                 frame_to_display = self.current_frame
                 self.new_frame_available = False
-            # Keep fps_count reading inside lock? Or doesn't matter? Let's keep outside.
 
-        # --- Process Frame (outside lock) ---
+        # --- 处理帧（锁外部） ---
         if frame_to_display is not None:
             try:
-                height, width = frame_to_display.shape[:2]
-                bytes_per_line = frame_to_display.strides[0]
+                height, width = frame_to_display.shape[:2]   #获取帧的高度、宽度
+                bytes_per_line = frame_to_display.strides[0]  #每行的字节数
 
-                if len(frame_to_display.shape) == 3: # Color
-                    # Check if BGR or RGB - Assuming BGR from OpenCV/Hikvision typically
+                if len(frame_to_display.shape) == 3: # Color 颜色 
+                    # 检查是BGR还是RGB
                     if frame_to_display.shape[2] == 3:
                         q_image = QImage(frame_to_display.data, width, height, bytes_per_line, QImage.Format_BGR888)
                     elif frame_to_display.shape[2] == 4: # BGRA?
-                         q_image = QImage(frame_to_display.data, width, height, bytes_per_line, QImage.Format_ARGB32) # Or RGBA8888? Test needed
+                         q_image = QImage(frame_to_display.data, width, height, bytes_per_line, QImage.Format_ARGB32) 
                     else:
-                        logger.warning(f"Unsupported color image shape: {frame_to_display.shape}")
-                        return # Skip display if format unknown
-                elif len(frame_to_display.shape) == 2: # Grayscale
+                        logger.warning(f"不支持的彩色图像形状: {frame_to_display.shape}")
+                        return # 如果格式未知则跳过显示
+                elif len(frame_to_display.shape) == 2: # Grayscale  灰度
                     q_image = QImage(frame_to_display.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
                 else:
-                     logger.warning(f"Unsupported image shape: {frame_to_display.shape}")
-                     return # Skip display if format unknown
+                     logger.warning(f"不支持的图像形状: {frame_to_display.shape}")
+                     return # 如果格式未知则跳过显示
 
-                # Convert to QPixmap for display in ImageViewerWidget (it handles pixmaps)
-                # Make a copy to avoid issues if q_image data goes out of scope? Yes.
+                # 转换为QPixmap以在ImageViewerWidget中显示（它处理像素图）
+                #q_image.copy()防止底层数据在 QPixmap 仍在使用时被释放或修改
                 pixmap = QPixmap.fromImage(q_image.copy())
-                self._image_viewer.set_image(pixmap) # Use set_image which takes QPixmap/QImage
+                self._image_viewer.set_image(pixmap) # 设置并显示新的 pixmap
 
             except Exception as e:
                 logger.error(f"图像转换/显示错误: {e}", exc_info=True)
 
-        # --- Calculate and Update FPS ---
+        # --- 计算并更新帧率 ---
         now = time.time()
-        elapsed = now - self.last_fps_time
-        if elapsed >= 1.0: # Update FPS display every second
-            with self.frame_lock: # Get count safely
+        elapsed = now - self.last_fps_time    #self.last_fps_time：记录上次计算 FPS 的时间
+        if elapsed >= 1.0: #每秒更新帧率显示
+            with self.frame_lock: # 安全获取计数
                 current_fps_count = self.fps_count
-                self.fps_count = 0 # Reset counter for next interval
+                self.fps_count = 0 # 重置下一个时间间隔的计数器
             self.display_fps = current_fps_count / elapsed
             self.last_fps_time = now
             self._fps_label.setText(f"FPS: {self.display_fps:.1f}")
@@ -1203,7 +1200,6 @@ def main():
     """Main function to run the application."""
     app = QApplication(sys.argv)
 
-    # Apply a simple style (optional)
     # app.setStyle("Fusion")
 
     window = CameraTabWidget()
